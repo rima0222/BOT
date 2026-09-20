@@ -163,7 +163,7 @@
       <div class="card"><div class="label">برد</div><div class="value green" id="winsCount">—</div></div>
       <div class="card"><div class="label">باخت</div><div class="value red" id="lossesCount">—</div></div>
       <div class="card"><div class="label">درصد وین</div><div class="value" id="winrate">—</div></div>
-      <div class="card"><div class="label">پوزیشن‌های باز</div><div class="value" id="openCount">—</div></div>
+      <div class="card"><div class="label">پوزیشن‌های باز</div><div class="value" id="openCount" dir="ltr" style="text-align:right;">—</div></div>
       <div class="card"><div class="label">سود/زیان تجمعی</div><div class="value" id="pnlTotal">—</div></div>
     </div>
 
@@ -178,17 +178,30 @@
       <div class="controls-row">
         <label>درصد ریسک هر معامله:</label>
         <select id="riskSelect"></select>
-        <label style="margin-right:16px;">سرمایه اولیه ($):</label>
-        <input type="number" id="capitalInput" min="1" step="1">
-        <button id="saveBtn" class="btn btn-save">ذخیره</button>
+        <button id="saveRiskBtn" class="btn btn-save">ذخیره درصد ریسک</button>
         <span id="saveMsg" style="font-size:12px;"></span>
       </div>
       <div class="controls-row" style="margin-top:4px;">
         <span class="hint">حداقل R:R: <b id="minRR">—</b></span>
         <span class="hint">هزینه تخمینی هر پا: <b id="costPct">—</b></span>
         <span class="hint">سقف پوزیشن هم‌زمان: <b id="maxPos">—</b></span>
+        <span class="hint">سقف لوریج: <b id="maxLev">—</b></span>
+        <span class="hint">سقف سهم هر پوزیشن از سرمایه: <b id="maxPosPct">—</b></span>
         <span class="hint">تایید چند-تایم‌فریمی: <b id="htfStatus">—</b></span>
         <div class="htf-tags" id="htfTags"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>ریست سرمایه اولیه</h2>
+        <span class="hint">⚠️ این عملیات باعث ریست شدن خط پایه‌ی محاسبه‌ی «بازده کل» می‌شه (تاریخچه‌ی معاملات پاک نمی‌شه). فقط وقتی هیچ پوزیشن بازی نداری قابل‌انجامه.</span>
+      </div>
+      <div class="controls-row">
+        <label>سرمایه جدید ($):</label>
+        <input type="number" id="capitalInput" min="1" step="1">
+        <button id="resetCapitalBtn" class="btn btn-stop">ریست سرمایه</button>
+        <span id="resetMsg" style="font-size:12px;"></span>
       </div>
     </div>
 
@@ -213,7 +226,10 @@
         <div class="panel-head"><h2>معاملات باز</h2></div>
         <div class="scrollbox">
           <table id="openTable">
-            <thead><tr><th>نماد</th><th>جهت</th><th>ورود</th><th>حدضرر</th><th>حدسود</th><th>حجم ($)</th><th></th></tr></thead>
+            <thead><tr>
+              <th>نماد</th><th>جهت</th><th>ورود</th><th>حدضرر</th><th>حدسود</th>
+              <th>لوریج</th><th>مارجین ($)</th><th>ارزش پوزیشن ($)</th><th>قیمت لیکویید</th><th></th>
+            </tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -230,7 +246,10 @@
       <div class="panel-head"><h2>تاریخچه معاملات بسته‌شده</h2></div>
       <div class="scrollbox">
         <table id="closedTable">
-          <thead><tr><th>نماد</th><th>جهت</th><th>ورود</th><th>خروج</th><th>کارمزد</th><th>سود/زیان خالص</th><th>نتیجه</th><th>زمان بسته‌شدن</th></tr></thead>
+          <thead><tr>
+            <th>نماد</th><th>جهت</th><th>ورود</th><th>خروج</th><th>لوریج</th>
+            <th>مارجین ($)</th><th>کارمزد</th><th>سود/زیان خالص</th><th>نتیجه</th><th>زمان بسته‌شدن</th>
+          </tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -273,20 +292,38 @@ document.getElementById('toggleBtn').addEventListener('click', async () => {
   refresh();
 });
 
-document.getElementById('saveBtn').addEventListener('click', async () => {
+document.getElementById('saveRiskBtn').addEventListener('click', async () => {
   const risk = parseFloat(document.getElementById('riskSelect').value);
-  const capital = parseFloat(document.getElementById('capitalInput').value);
-  const payload = { risk_pct: risk };
-  if (!isNaN(capital) && capital > 0) payload.initial_capital = capital;
   const res = await fetch('/api/control', {
     method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify(payload)
+    body: JSON.stringify({ risk_pct: risk })
   });
   const data = await res.json();
   const msg = document.getElementById('saveMsg');
   msg.innerText = data.ok ? '✓ ذخیره شد' : ('خطا: ' + (data.error || '')) ;
   msg.style.color = data.ok ? 'var(--green)' : 'var(--red)';
   setTimeout(() => msg.innerText = '', 3000);
+  refresh();
+});
+
+document.getElementById('resetCapitalBtn').addEventListener('click', async () => {
+  const capital = parseFloat(document.getElementById('capitalInput').value);
+  const msg = document.getElementById('resetMsg');
+  if (isNaN(capital) || capital <= 0) {
+    msg.innerText = 'یک عدد معتبر وارد کن';
+    msg.style.color = 'var(--red)';
+    return;
+  }
+  if (!confirm(`سرمایه به $${capital} ریست بشه؟ این کار خط پایه‌ی محاسبه‌ی «بازده کل» رو ریست می‌کنه (تاریخچه‌ی معاملات پاک نمی‌شه). ادامه بدم؟`)) return;
+
+  const res = await fetch('/api/reset_capital', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ amount: capital })
+  });
+  const data = await res.json();
+  msg.innerText = data.ok ? '✓ سرمایه ریست شد' : ('خطا: ' + (data.error || ''));
+  msg.style.color = data.ok ? 'var(--green)' : 'var(--red)';
+  setTimeout(() => msg.innerText = '', 5000);
   refresh();
 });
 
@@ -350,6 +387,8 @@ async function refresh(){
     document.getElementById('minRR').innerText = data.min_rr;
     document.getElementById('costPct').innerText = data.cost_pct_per_side + '%';
     document.getElementById('maxPos').innerText = data.max_open_positions;
+    document.getElementById('maxLev').innerText = data.max_leverage + 'x';
+    document.getElementById('maxPosPct').innerText = data.max_position_pct + '%';
     document.getElementById('htfStatus').innerText = data.htf_enabled ? 'فعال' : 'غیرفعال';
     document.getElementById('htfTags').innerHTML = data.htf_enabled
       ? data.htf_timeframes.map(tf => `<span class="htf-tag">${tf}</span>`).join('') : '';
@@ -386,7 +425,10 @@ async function refresh(){
       <tr>
         <td>${t.symbol}</td><td>${sideBadge(t.side)}</td>
         <td>${fmt(t.entry)}</td><td>${fmt(t.sl)}</td><td>${fmt(t.tp)}</td>
+        <td><span dir="ltr">${fmt(t.leverage,1)}x</span></td>
+        <td>${fmt(t.margin,2)}</td>
         <td>${fmt(t.notional,2)}</td>
+        <td>${fmt(t.liquidation_price)}</td>
         <td><button class="btn btn-close" onclick="closeTrade(${t.id})">بستن</button></td>
       </tr>`).join('');
 
@@ -396,6 +438,8 @@ async function refresh(){
       <tr>
         <td>${t.symbol}</td><td>${sideBadge(t.side)}</td>
         <td>${fmt(t.entry)}</td><td>${fmt(t.close_price)}</td>
+        <td><span dir="ltr">${fmt(t.leverage,1)}x</span></td>
+        <td>${fmt(t.margin,2)}</td>
         <td>${fmt(t.fee_cost,2)}</td>
         <td class="${t.pnl>=0?'green':'red'}">${t.pnl>=0?'+':''}${fmt(t.pnl,2)}</td>
         <td><span class="badge ${t.result==='WIN'?'win':'loss'}">${t.result==='WIN'?'برد':'باخت'}</span></td>
