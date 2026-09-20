@@ -140,19 +140,22 @@ def scan_symbol(symbol, settings):
         log.info(f"[رد شد - عدم تایید تایم‌فریم بالاتر] {symbol} {sig['side']} | {htf_detail}")
         return
 
-    # ۳) باز کردن پوزیشن مجازی (با رعایت واقعی سرمایه‌ی در دسترس و سقف تعداد پوزیشن)
+    # ۳) باز کردن پوزیشن مجازی (با رعایت واقعی سرمایه، لوریج ایمن و سقف تنوع)
     trade_res = paper_trader.open_trade(
         conn, symbol, sig["side"], sig["entry"], sig["sl"], sig["tp"],
         settings["risk_pct"], settings["initial_capital"],
         min_notional=config.MIN_NOTIONAL_USD, max_open_positions=config.MAX_OPEN_POSITIONS,
+        max_leverage=config.MAX_LEVERAGE, leverage_safety_mult=config.LEVERAGE_SAFETY_MULTIPLIER,
+        position_pct_cap=config.MAX_POSITION_PCT_OF_CAPITAL,
     )
 
     if trade_res["opened"]:
-        cap_note = " (حجم به‌خاطر محدودیت سرمایه‌ی آزاد کوچک‌تر شد)" if trade_res.get("capped") else ""
+        cap_note = " (حجم به‌خاطر سقف تنوع/سرمایه‌ی آزاد کوچک‌تر شد)" if trade_res.get("capped") else ""
         log.info(
             f"[سیگنال جدید ✅] {symbol} {sig['side']} ورود={sig['entry']:.4f} "
             f"حدضرر={sig['sl']:.4f} حدسود={sig['tp']:.4f} R:R={sig['rr']:.2f} "
-            f"ریسک={settings['risk_pct']}% حجم=${trade_res['notional']:.2f}{cap_note} | HTF: {htf_detail}"
+            f"ریسک={settings['risk_pct']}% لوریج={trade_res['leverage']}x "
+            f"مارجین=${trade_res['margin']:.2f} ارزش‌پوزیشن=${trade_res['notional']:.2f}{cap_note} | HTF: {htf_detail}"
         )
     else:
         log.info(f"[سیگنال رد شد - {trade_res['reason']}] {symbol} {sig['side']}")
@@ -245,6 +248,8 @@ def api_data():
         "max_open_positions": config.MAX_OPEN_POSITIONS,
         "min_rr": config.MIN_RISK_REWARD,
         "cost_pct_per_side": config.COST_PCT_PER_SIDE,
+        "max_leverage": config.MAX_LEVERAGE,
+        "max_position_pct": config.MAX_POSITION_PCT_OF_CAPITAL,
         "htf_enabled": config.USE_HTF_CONFIRMATION,
         "htf_timeframes": config.HTF_TIMEFRAMES,
         "system": system_stats,
@@ -262,7 +267,11 @@ def api_data():
 
 @app.route("/api/control", methods=["POST"])
 def api_control():
-    """کنترل از پنل: روشن/متوقف کردن معامله‌گیری، تغییر درصد ریسک، تغییر سرمایه اولیه."""
+    """
+    کنترل از پنل: روشن/متوقف کردن معامله‌گیری و تغییر درصد ریسک.
+    عمداً «سرمایه اولیه» اینجا نیست — اون یک عملیات جدا و آگاهانه‌ست (/api/reset_capital)
+    چون خط پایه‌ی محاسبه‌ی بازده رو عوض می‌کنه و نباید به‌صورت جانبی اجرا بشه.
+    """
     body = request.get_json(force=True, silent=True) or {}
 
     if "running" in body:
@@ -280,16 +289,32 @@ def api_control():
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "مقدار ریسک نامعتبر است"}), 400
 
-    if "initial_capital" in body:
-        try:
-            amount = float(body["initial_capital"])
-            if amount <= 0:
-                return jsonify({"ok": False, "error": "سرمایه باید بزرگ‌تر از صفر باشد"}), 400
-            paper_trader.reset_capital(conn, amount)
-            log.info(f"[کنترل پنل] سرمایه اولیه به {amount} تنظیم شد")
-        except (TypeError, ValueError):
-            return jsonify({"ok": False, "error": "مقدار سرمایه نامعتبر است"}), 400
+    return jsonify({"ok": True, "settings": get_bot_settings()})
 
+
+@app.route("/api/reset_capital", methods=["POST"])
+def api_reset_capital():
+    """
+    عملیات جدا و آگاهانه برای تغییر/ریست سرمایه اولیه. تاریخچه‌ی معاملات پاک
+    نمی‌شه، فقط خط پایه‌ی موجودی/بازده ریست می‌شه. پنل قبل از این باید تایید
+    صریح از کاربر بگیره (چون برگشت‌ناپذیره).
+    """
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        amount = float(body.get("amount"))
+        if amount <= 0:
+            return jsonify({"ok": False, "error": "سرمایه باید بزرگ‌تر از صفر باشد"}), 400
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "مقدار سرمایه نامعتبر است"}), 400
+
+    if paper_trader.get_open_position_count(conn) > 0:
+        return jsonify({
+            "ok": False,
+            "error": "برای ریست سرمایه، اول همه‌ی پوزیشن‌های باز رو ببند (وگرنه محاسبه‌ی سرمایه‌ی قفل‌شده به‌هم می‌ریزه)."
+        }), 400
+
+    paper_trader.reset_capital(conn, amount)
+    log.info(f"[ریست سرمایه از پنل] سرمایه اولیه به {amount} تنظیم شد")
     return jsonify({"ok": True, "settings": get_bot_settings()})
 
 
