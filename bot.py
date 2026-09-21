@@ -35,6 +35,40 @@ last_update_time = {"value": None}
 # لیست فعلی نمادهای رصدشده (اگه DYNAMIC_SYMBOLS روشن باشه، خودکار آپدیت می‌شه)
 active_symbols = {"list": list(config.SYMBOLS)}
 
+# آخرین قیمت شناخته‌شده‌ی هر نماد — برای محاسبه‌ی سود/زیان لحظه‌ای پوزیشن‌های باز
+latest_prices = {}
+
+
+def compute_live_position_metrics(trade, current_price):
+    """
+    برای یک پوزیشن باز، سود/زیان لحظه‌ای (خام) و درصد پیشرفت به سمت TP/SL رو
+    حساب می‌کنه. progress_pct بین -100 (دقیقاً روی حد ضرر) تا +100 (دقیقاً روی
+    حد سود) هست؛ صفر یعنی دقیقاً روی نقطه‌ی ورود.
+    """
+    entry, sl, tp, size, side = trade["entry"], trade["sl"], trade["tp"], trade["size"], trade["side"]
+    if current_price is None or size in (None, 0) or entry in (None, 0):
+        return {"live_price": None, "unrealized_pnl": None, "unrealized_pnl_pct": None, "progress_pct": None}
+
+    unrealized_pnl = (current_price - entry) * size if side == "LONG" else (entry - current_price) * size
+    margin = trade.get("margin") or 0
+    unrealized_pnl_pct = (unrealized_pnl / margin * 100) if margin else None
+
+    if unrealized_pnl >= 0:
+        reward_dist = abs(tp - entry)
+        progress = (unrealized_pnl / (reward_dist * size) * 100) if reward_dist and size else 0
+    else:
+        risk_dist = abs(entry - sl)
+        progress = -(abs(unrealized_pnl) / (risk_dist * size) * 100) if risk_dist and size else 0
+
+    progress = max(-100, min(100, progress))
+
+    return {
+        "live_price": current_price,
+        "unrealized_pnl": round(unrealized_pnl, 4),
+        "unrealized_pnl_pct": round(unrealized_pnl_pct, 2) if unrealized_pnl_pct is not None else None,
+        "progress_pct": round(progress, 1),
+    }
+
 
 def get_bot_settings():
     """تنظیمات قابل‌کنترل از پنل: وضعیت روشن/متوقف، درصد ریسک، سرمایه اولیه."""
@@ -121,6 +155,7 @@ def scan_symbol(symbol, settings):
     latest_analysis[symbol] = result
 
     current_price = result["price"]
+    latest_prices[symbol] = current_price
     paper_trader.check_and_close_trades(
         conn, symbol, current_price, settings["initial_capital"], config.COST_PCT_PER_SIDE
     )
@@ -181,6 +216,7 @@ def price_check_job():
             df = fetch_symbol_df(symbol)
             if df is not None:
                 price = float(df["close"].iloc[-1])
+                latest_prices[symbol] = price
                 paper_trader.check_and_close_trades(
                     conn, symbol, price, settings["initial_capital"], config.COST_PCT_PER_SIDE
                 )
@@ -209,6 +245,8 @@ def api_data():
     locked_capital = round(paper_trader.get_locked_capital(conn), 2)
     available_capital = round(balance - locked_capital, 2)
     open_trades = paper_trader.get_open_trades(conn)
+    for t in open_trades:
+        t.update(compute_live_position_metrics(t, latest_prices.get(t["symbol"])))
     closed_trades = paper_trader.get_closed_trades(conn)
     equity_curve = paper_trader.get_equity_curve(conn)
 
