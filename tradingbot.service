@@ -1,0 +1,17 @@
+[Unit]
+Description=Virtual Trading Bot (Paper Trading)
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/home/%i/tradingbot
+ExecStart=/home/%i/tradingbot/venv/bin/python3 /home/%i/tradingbot/bot.py
+Restart=always
+RestartSec=10
+# مصرف منابع رو محدود نگه می‌داره تا برای VPS سبک مناسب باشه
+MemoryMax=300M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target
