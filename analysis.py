@@ -121,6 +121,53 @@ def is_rejection_candle(df, side, level, proximity_pct):
         return touched and bearish and closed_lower_half
 
 
+def finalize_signal(side, entry, sl, level, atr, cfg, tp_uses_level):
+    """
+    مرحله‌ی نهایی و مشترکِ ساخت سیگنال برای *همه‌ی* استراتژی‌ها (هم ربات زنده، هم
+    موتور بک‌تست همین قواعد رو دقیقاً با همین ترتیب محاسبه اجرا می‌کنه):
+      ۱) حداقل فاصله‌ی حد ضرر (MIN_SL_PCT / MIN_SL_ATR_MULT) — اگه روشن باشه SL عقب‌تر می‌ره
+      ۲) حد سود = حداقل R:R برابر ریسک (برای داو، اگه سطح مقابل دورتر باشه، خود سطح)
+      ۳) چک حداقل R:R
+      ۴) (اختیاری) فضای کافی تا سطح مقابل (REQUIRE_ROOM_TO_TARGET)
+    level: نزدیک‌ترین سطح مخالف (مقاومت برای خرید، حمایت برای فروش) یا None
+    """
+    min_rr = cfg.MIN_RISK_REWARD
+    if side == "LONG":
+        risk = entry - sl
+    else:
+        risk = sl - entry
+    if not (risk > 0):
+        return None
+
+    req = max(entry * getattr(cfg, "MIN_SL_PCT", 0.0) / 100.0,
+              (atr or 0.0) * getattr(cfg, "MIN_SL_ATR_MULT", 0.0))
+    if risk < req:
+        if side == "LONG":
+            sl = entry - req
+            risk = entry - sl
+        else:
+            sl = entry + req
+            risk = sl - entry
+
+    if side == "LONG":
+        tp_min = entry + risk * min_rr
+        tp = max(tp_min, level) if (tp_uses_level and level) else tp_min
+        rr = (tp - entry) / risk
+    else:
+        tp_min = entry - risk * min_rr
+        tp = min(tp_min, level) if (tp_uses_level and level) else tp_min
+        rr = (entry - tp) / risk
+    if not (rr >= min_rr - 1e-9):
+        return None
+
+    if getattr(cfg, "REQUIRE_ROOM_TO_TARGET", False) and level:
+        room = (level - entry) if side == "LONG" else (entry - level)
+        if not (room >= min_rr * risk - 1e-9):
+            return None
+
+    return {"side": side, "entry": entry, "sl": sl, "tp": tp, "rr": rr}
+
+
 def generate_signal(df, cfg):
     """
     خروجی: دیکشنری شامل روند فعلی، قیمت، نزدیک‌ترین حمایت/مقاومت،
@@ -159,17 +206,10 @@ def generate_signal(df, cfg):
             df, "LONG", nearest_support, cfg.PROXIMITY_PCT
         )
         if 0 <= dist_pct <= cfg.PROXIMITY_PCT and rejection_ok:
-            entry = current_price
-            sl = nearest_support - atr * cfg.ATR_SL_BUFFER
-            risk = entry - sl
-            if risk > 0:
-                tp_min = entry + risk * cfg.MIN_RISK_REWARD
-                tp = max(tp_min, nearest_resistance) if nearest_resistance else tp_min
-                rr = (tp - entry) / risk
-                if rr >= cfg.MIN_RISK_REWARD - 1e-9:
-                    result["signal"] = {
-                        "side": "LONG", "entry": entry, "sl": sl, "tp": tp, "rr": rr,
-                    }
+            result["signal"] = finalize_signal(
+                "LONG", current_price, nearest_support - atr * cfg.ATR_SL_BUFFER,
+                nearest_resistance, atr, cfg, tp_uses_level=True,
+            )
 
     # --- سناریوی فروش: روند نزولی + قیمت نزدیک مقاومت + کندل تاییدی ---
     if trend == "downtrend" and nearest_resistance and vol_ok and result["signal"] is None:
@@ -178,16 +218,9 @@ def generate_signal(df, cfg):
             df, "SHORT", nearest_resistance, cfg.PROXIMITY_PCT
         )
         if 0 <= dist_pct <= cfg.PROXIMITY_PCT and rejection_ok:
-            entry = current_price
-            sl = nearest_resistance + atr * cfg.ATR_SL_BUFFER
-            risk = sl - entry
-            if risk > 0:
-                tp_min = entry - risk * cfg.MIN_RISK_REWARD
-                tp = min(tp_min, nearest_support) if nearest_support else tp_min
-                rr = (entry - tp) / risk
-                if rr >= cfg.MIN_RISK_REWARD - 1e-9:
-                    result["signal"] = {
-                        "side": "SHORT", "entry": entry, "sl": sl, "tp": tp, "rr": rr,
-                    }
+            result["signal"] = finalize_signal(
+                "SHORT", current_price, nearest_resistance + atr * cfg.ATR_SL_BUFFER,
+                nearest_support, atr, cfg, tp_uses_level=True,
+            )
 
     return result

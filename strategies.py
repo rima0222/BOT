@@ -57,29 +57,22 @@ def generate_breakout(df, cfg):
 
     # بریک‌اوت صعودی: بستن کندل بالای سقف N کندل اخیر + حجم بالا
     if current["close"] > recent_high and vol_ok:
-        entry = current_price
-        sl = recent_high - atr * cfg.ATR_SL_BUFFER  # همون سطح شکسته‌شده، حالا حمایت جدید
-        risk = entry - sl
-        if risk > 0:
-            tp = entry + risk * cfg.MIN_RISK_REWARD
-            rr = (tp - entry) / risk
-            if rr >= cfg.MIN_RISK_REWARD - 1e-9:
-                result["trend"] = "uptrend"
-                result["signal"] = {"side": "LONG", "entry": entry, "sl": sl, "tp": tp, "rr": rr}
-                return result
+        # همون سطح شکسته‌شده، حالا حمایت جدید
+        sig = analysis.finalize_signal("LONG", current_price, float(recent_high) - atr * cfg.ATR_SL_BUFFER,
+                                       None, atr, cfg, tp_uses_level=False)
+        if sig:
+            result["trend"] = "uptrend"
+            result["signal"] = sig
+            return result
 
     # بریک‌اوت نزولی: بستن کندل زیر کف N کندل اخیر + حجم بالا
     if current["close"] < recent_low and vol_ok:
-        entry = current_price
-        sl = recent_low + atr * cfg.ATR_SL_BUFFER
-        risk = sl - entry
-        if risk > 0:
-            tp = entry - risk * cfg.MIN_RISK_REWARD
-            rr = (entry - tp) / risk
-            if rr >= cfg.MIN_RISK_REWARD - 1e-9:
-                result["trend"] = "downtrend"
-                result["signal"] = {"side": "SHORT", "entry": entry, "sl": sl, "tp": tp, "rr": rr}
-                return result
+        sig = analysis.finalize_signal("SHORT", current_price, float(recent_low) + atr * cfg.ATR_SL_BUFFER,
+                                       None, atr, cfg, tp_uses_level=False)
+        if sig:
+            result["trend"] = "downtrend"
+            result["signal"] = sig
+            return result
 
     result["trend"] = "sideways"
     return result
@@ -123,25 +116,16 @@ def generate_volume_spike(df, cfg):
     if not (is_spike and directional):
         return result
 
-    entry = current_price
     if current["close"] > current["open"]:
         result["trend"] = "uptrend"
-        sl = current["low"] - atr * cfg.ATR_SL_BUFFER
-        risk = entry - sl
-        if risk > 0:
-            tp = entry + risk * cfg.MIN_RISK_REWARD
-            rr = (tp - entry) / risk
-            if rr >= cfg.MIN_RISK_REWARD - 1e-9:
-                result["signal"] = {"side": "LONG", "entry": entry, "sl": sl, "tp": tp, "rr": rr}
+        result["signal"] = analysis.finalize_signal(
+            "LONG", current_price, float(current["low"]) - atr * cfg.ATR_SL_BUFFER, None, atr, cfg,
+            tp_uses_level=False)
     else:
         result["trend"] = "downtrend"
-        sl = current["high"] + atr * cfg.ATR_SL_BUFFER
-        risk = sl - entry
-        if risk > 0:
-            tp = entry - risk * cfg.MIN_RISK_REWARD
-            rr = (entry - tp) / risk
-            if rr >= cfg.MIN_RISK_REWARD - 1e-9:
-                result["signal"] = {"side": "SHORT", "entry": entry, "sl": sl, "tp": tp, "rr": rr}
+        result["signal"] = analysis.finalize_signal(
+            "SHORT", current_price, float(current["high"]) + atr * cfg.ATR_SL_BUFFER, None, atr, cfg,
+            tp_uses_level=False)
 
     return result
 
@@ -208,19 +192,13 @@ def generate_candle_setup(df, cfg):
         is_bof = touched and broke_slightly and closed_back_above and close_pos in ("high", "mid")
 
         if is_tst or is_bof:
-            entry = current_price
-            sl = l - atr * cfg.ATR_SL_BUFFER
-            risk = entry - sl
-            if risk > 0:
-                tp = entry + risk * cfg.MIN_RISK_REWARD
-                rr = (tp - entry) / risk
-                if rr >= cfg.MIN_RISK_REWARD - 1e-9:
-                    result["trend"] = "uptrend"
-                    result["signal"] = {
-                        "side": "LONG", "entry": entry, "sl": sl, "tp": tp, "rr": rr,
-                        "setup_type": "TST" if is_tst else "BOF",
-                    }
-                    return result
+            sig = analysis.finalize_signal("LONG", current_price, l - atr * cfg.ATR_SL_BUFFER,
+                                           nearest_resistance, atr, cfg, tp_uses_level=False)
+            if sig:
+                sig["setup_type"] = "TST" if is_tst else "BOF"
+                result["trend"] = "uptrend"
+                result["signal"] = sig
+                return result
 
     # --- نزدیک مقاومت: به‌دنبال ستاپ نزولی (TST یا BOF) ---
     if nearest_resistance:
@@ -233,19 +211,13 @@ def generate_candle_setup(df, cfg):
         is_bof = touched and broke_slightly and closed_back_below and close_pos in ("low", "mid")
 
         if is_tst or is_bof:
-            entry = current_price
-            sl = h + atr * cfg.ATR_SL_BUFFER
-            risk = sl - entry
-            if risk > 0:
-                tp = entry - risk * cfg.MIN_RISK_REWARD
-                rr = (entry - tp) / risk
-                if rr >= cfg.MIN_RISK_REWARD - 1e-9:
-                    result["trend"] = "downtrend"
-                    result["signal"] = {
-                        "side": "SHORT", "entry": entry, "sl": sl, "tp": tp, "rr": rr,
-                        "setup_type": "TST" if is_tst else "BOF",
-                    }
-                    return result
+            sig = analysis.finalize_signal("SHORT", current_price, h + atr * cfg.ATR_SL_BUFFER,
+                                           nearest_support, atr, cfg, tp_uses_level=False)
+            if sig:
+                sig["setup_type"] = "TST" if is_tst else "BOF"
+                result["trend"] = "downtrend"
+                result["signal"] = sig
+                return result
 
     return result
 
@@ -270,23 +242,42 @@ STRATEGY_REGISTRY = {
 }
 
 
+def _window(df, end_offset, size):
+    """پنجره‌ی دقیقاً size کندلی که به کندلِ end_offset تا از آخر ختم می‌شه (۰ = آخرین کندل)."""
+    end = len(df) - end_offset
+    if end <= 0:
+        return None
+    return df.iloc[max(0, end - size):end]
+
+
+def _run_strategy(name, window_df, cfg):
+    if window_df is None or len(window_df) == 0:
+        return None
+    try:
+        return STRATEGY_REGISTRY[name]["fn"](window_df, cfg)
+    except Exception:
+        return None
+
+
 def generate_combined_signal(df, cfg):
     """
-    اجرای همه‌ی استراتژی‌های فعال روی یک دیتافریم، و ترکیبشون طبق
-    cfg.STRATEGY_COMBINE_MODE. خروجی رو با یک فیلد "strategy" مشخص می‌کنه که
-    کدوم استراتژی سیگنال رو صادر کرده (برای تحلیل بعدی).
+    اجرای همه‌ی استراتژی‌های فعال روی آخرین پنجره‌ی CANDLE_LIMIT کندلی، و ترکیبشون طبق
+    cfg.STRATEGY_COMBINE_MODE:
+      - "any": اولین استراتژی (به ترتیب لیست) که سیگنال داد.
+      - "all": همه‌ی استراتژی‌ها دقیقاً روی همین کندل و هم‌جهت.
+      - "confirm": استراتژی اول ماشه‌ست؛ بقیه باید در CONFIRM_LOOKBACK_BARS کندل اخیر
+        (شامل همین کندل) حداقل یک سیگنال هم‌جهت داده باشن.
+    df می‌تونه بلندتر از CANDLE_LIMIT باشه (برای حالت confirm لازمه)؛ هر ارزیابی دقیقاً
+    روی یک پنجره‌ی CANDLE_LIMIT کندلی انجام می‌شه — درست مثل موتور بک‌تست.
     """
     active = [s for s in getattr(cfg, "ACTIVE_STRATEGIES", ["dow_support_resistance"])
               if s in STRATEGY_REGISTRY]
     if not active:
         active = ["dow_support_resistance"]
+    size = getattr(cfg, "CANDLE_LIMIT", len(df))
+    last_window = _window(df, 0, size)
 
-    results = {}
-    for name in active:
-        try:
-            results[name] = STRATEGY_REGISTRY[name]["fn"](df, cfg)
-        except Exception:
-            results[name] = None
+    results = {name: _run_strategy(name, last_window, cfg) for name in active}
 
     primary = results.get(active[0]) or next((r for r in results.values() if r), {
         "trend": "sideways", "price": float(df["close"].iloc[-1]),
@@ -300,9 +291,7 @@ def generate_combined_signal(df, cfg):
         if len(signals) == len(active) and len(signals) > 0:
             sides = {s["side"] for s in signals}
             if len(sides) == 1:
-                # میانگین سطوح ورود/خروج بین استراتژی‌های توافق‌کننده (محافظه‌کارانه)
-                chosen = min(signals, key=lambda s: s["rr"])  # کم‌ریسک‌ترین (محافظه‌کارترین) رو انتخاب کن
-                chosen = dict(chosen)
+                chosen = dict(min(signals, key=lambda s: s["rr"]))  # محافظه‌کارترین
                 chosen["strategy"] = "+".join(active)
                 primary = dict(primary)
                 primary["signal"] = chosen
@@ -310,6 +299,28 @@ def generate_combined_signal(df, cfg):
         primary = dict(primary)
         primary["signal"] = None
         return primary
+
+    if combine_mode == "confirm":
+        trig = results.get(active[0])
+        primary = dict(primary)
+        primary["signal"] = None
+        if not trig or not trig.get("signal"):
+            return primary
+        side = trig["signal"]["side"]
+        lookback = max(1, int(getattr(cfg, "CONFIRM_LOOKBACK_BARS", 8)))
+        for name in active[1:]:
+            confirmed = False
+            for k in range(lookback):
+                r = results.get(name) if k == 0 else _run_strategy(name, _window(df, k, size), cfg)
+                if r and r.get("signal") and r["signal"]["side"] == side:
+                    confirmed = True
+                    break
+            if not confirmed:
+                return primary
+        out = dict(trig)
+        out["signal"] = dict(trig["signal"])
+        out["signal"]["strategy"] = "|".join(active)
+        return out
 
     # حالت "any": اولین استراتژی‌ای که سیگنال داده رو قبول کن
     for name in active:

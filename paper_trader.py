@@ -73,7 +73,7 @@ def get_conn(db_path):
         ("notional", "REAL"), ("fee_cost", "REAL"), ("margin", "REAL"),
         ("leverage", "REAL"), ("liquidation_price", "REAL"),
         ("initial_sl", "REAL"), ("peak_price", "REAL"), ("trailing_enabled", "INTEGER DEFAULT 0"),
-        ("strategy_name", "TEXT"), ("exit_type", "TEXT"),
+        ("strategy_name", "TEXT"), ("exit_type", "TEXT"), ("last_bar_ts", "INTEGER"),
     )
     for col, coltype in new_cols:
         if col not in existing_cols:
@@ -179,28 +179,24 @@ def set_setting(conn, key, value):
 
 # ==================== باز کردن پوزیشن ====================
 
-def open_trade(conn, symbol, side, entry, sl, tp, risk_pct, start_balance,
-                min_notional=5.0, max_open_positions=None,
-                max_leverage=5, leverage_safety_mult=1.6, position_pct_cap=20.0,
-                trailing_enabled=False, strategy_name=None, as_of=None):
+def compute_position_size(side, entry, sl, risk_pct, balance, locked_margin, open_count,
+                          min_notional=5.0, max_open_positions=None, max_leverage=5,
+                          leverage_safety_mult=1.6, position_pct_cap=20.0):
     """
-    باز کردن پوزیشن مجازی با لوریج و مدیریت سرمایه‌ی واقعی.
-    خروجی: dict شامل opened (True/False) و در صورت باز شدن، جزئیات کامل پوزیشن.
+    محاسبه‌ی خالص (بدون دیتابیس) حجم/لوریج/مارجین یک پوزیشن جدید. هم ربات زنده
+    (open_trade) و هم موتور بک‌تست دقیقاً از همین تابع استفاده می‌کنن.
     """
-    if max_open_positions is not None and get_open_position_count(conn) >= max_open_positions:
-        return {"opened": False, "reason": "max_positions_reached"}
-
+    if max_open_positions is not None and open_count >= max_open_positions:
+        return {"ok": False, "reason": "max_positions_reached"}
     if entry <= 0:
-        return {"opened": False, "reason": "invalid_entry"}
-
+        return {"ok": False, "reason": "invalid_entry"}
     per_unit_risk = abs(entry - sl)
     if per_unit_risk <= 0:
-        return {"opened": False, "reason": "invalid_stop"}
+        return {"ok": False, "reason": "invalid_stop"}
 
-    balance = get_balance(conn, start_balance, as_of=as_of)
-    available_margin = balance - get_locked_capital(conn)
+    available_margin = balance - locked_margin
     if available_margin < min_notional:
-        return {"opened": False, "reason": "insufficient_capital"}
+        return {"ok": False, "reason": "insufficient_capital"}
 
     sl_distance_pct = per_unit_risk / entry * 100
     safe_leverage = 100 / (sl_distance_pct * leverage_safety_mult) if sl_distance_pct > 0 else max_leverage
@@ -224,9 +220,31 @@ def open_trade(conn, symbol, side, entry, sl, tp, risk_pct, start_balance,
         margin, notional, size = raw_margin, raw_notional, raw_size
 
     if margin < min_notional:
-        return {"opened": False, "reason": "notional_too_small"}
+        return {"ok": False, "reason": "notional_too_small"}
 
     liquidation_price = entry * (1 - 1 / leverage) if side == "LONG" else entry * (1 + 1 / leverage)
+    return {"ok": True, "size": size, "notional": notional, "margin": margin, "leverage": leverage,
+            "liquidation_price": liquidation_price, "capped": capped, "per_unit_risk": per_unit_risk}
+
+
+def open_trade(conn, symbol, side, entry, sl, tp, risk_pct, start_balance,
+                min_notional=5.0, max_open_positions=None,
+                max_leverage=5, leverage_safety_mult=1.6, position_pct_cap=20.0,
+                trailing_enabled=False, strategy_name=None, as_of=None):
+    """
+    باز کردن پوزیشن مجازی با لوریج و مدیریت سرمایه‌ی واقعی.
+    خروجی: dict شامل opened (True/False) و در صورت باز شدن، جزئیات کامل پوزیشن.
+    """
+    balance = get_balance(conn, start_balance, as_of=as_of)
+    pos = compute_position_size(
+        side, entry, sl, risk_pct, balance, get_locked_capital(conn), get_open_position_count(conn),
+        min_notional=min_notional, max_open_positions=max_open_positions, max_leverage=max_leverage,
+        leverage_safety_mult=leverage_safety_mult, position_pct_cap=position_pct_cap,
+    )
+    if not pos["ok"]:
+        return {"opened": False, "reason": pos["reason"]}
+    size, notional, margin = pos["size"], pos["notional"], pos["margin"]
+    leverage, liquidation_price, capped = pos["leverage"], pos["liquidation_price"], pos["capped"]
 
     conn.execute("""
         INSERT INTO trades (symbol, side, entry, sl, tp, initial_sl, peak_price,
@@ -259,6 +277,7 @@ def compute_trailing_sl(entry, initial_sl, side, peak_price, ladder, beyond_dist
 
     peak_r = (peak_price - entry) / risk_per_unit if side == "LONG" else (entry - peak_price) / risk_per_unit
 
+    ladder = sorted(ladder, key=lambda x: x[0])
     locked_r = None
     for trigger_r, lock_r in ladder:
         if peak_r >= trigger_r - 1e-9:
@@ -291,6 +310,121 @@ def update_trailing_stops(conn, symbol, current_price, ladder, beyond_distance_r
         new_sl = compute_trailing_sl(entry, initial_sl, side, new_peak, ladder, beyond_distance_r)
         conn.execute("UPDATE trades SET peak_price=?, sl=? WHERE id=?", (new_peak, new_sl, trade_id))
     conn.commit()
+
+
+# ==================== مدیریت کندل‌به‌کندل (مشترک بین زنده و بک‌تست) ====================
+
+def step_bar(side, entry, initial_sl, sl, tp, peak, trailing, o, h, l, c, ladder, beyond_distance_r):
+    """
+    یک کندل (مثلاً ۱ دقیقه‌ای در زنده، ۱۵ دقیقه‌ای در بک‌تست) رو روی یک پوزیشن باز
+    اعمال می‌کنه — با سایه‌ها (high/low)، نه فقط قیمت بسته‌شدن؛ چون حد ضرر واقعی صرافی
+    با سایه هم فعال می‌شه. قواعد (محافظه‌کارانه، به ضرر خودمون):
+      ۱) اول حد ضرری که از قبل فعال بوده چک می‌شه. اگه قیمت باز شدن کندل از خودِ حد ضرر
+         هم رد شده باشه (گپ)، خروج با قیمت باز شدن (بدتر از SL) حساب می‌شه.
+      ۲) بدون تریلینگ: اگه همون کندل هم SL و هم TP رو لمس کرده، فرض می‌شه SL اول خورده.
+      ۳) با تریلینگ: بیشینه‌ی سود با سایه‌ی کندل آپدیت می‌شه؛ اگه SL جدید بالا رفت و
+         کندل پایین‌تر از اون بسته شد، یعنی قیمت بعد از سقف برگشته و به SL جدید خورده.
+    خروجی: (بسته شد؟, قیمت خروج, نوع خروج 'STOP'/'TP', سطح فعال‌شده, sl جدید, peak جدید)
+    """
+    if side == "LONG":
+        if l <= sl:
+            return True, (o if o < sl else sl), "STOP", sl, sl, peak
+        if not trailing:
+            if h >= tp:
+                return True, (o if o > tp else tp), "TP", tp, sl, peak
+            return False, None, None, None, sl, peak
+        new_peak = max(peak, h)
+        new_sl = max(compute_trailing_sl(entry, initial_sl, side, new_peak, ladder, beyond_distance_r), sl)
+        if new_sl > sl and c <= new_sl:
+            return True, new_sl, "STOP", new_sl, new_sl, new_peak
+        return False, None, None, None, new_sl, new_peak
+    else:
+        if h >= sl:
+            return True, (o if o > sl else sl), "STOP", sl, sl, peak
+        if not trailing:
+            if l <= tp:
+                return True, (o if o < tp else tp), "TP", tp, sl, peak
+            return False, None, None, None, sl, peak
+        new_peak = min(peak, l)
+        new_sl = min(compute_trailing_sl(entry, initial_sl, side, new_peak, ladder, beyond_distance_r), sl)
+        if new_sl < sl and c >= new_sl:
+            return True, new_sl, "STOP", new_sl, new_sl, new_peak
+        return False, None, None, None, new_sl, new_peak
+
+
+def classify_exit_level(kind, level, initial_sl, entry, trailing_enabled):
+    """نوع خروج بر اساس «سطحی که فعال شد» (نه قیمت پرشده، که با گپ ممکنه فرق کنه)."""
+    if kind == "TP":
+        return "TP"
+    if kind == "END":
+        return "END"
+    if not trailing_enabled:
+        return "SL"
+    if level == initial_sl:
+        return "SL"
+    if abs(level - entry) < max(entry * 0.0005, 1e-12):
+        return "BREAKEVEN"
+    return "TRAIL_SL"
+
+
+def process_bars(conn, symbol, bars, start_balance, ladder, beyond_distance_r,
+                 maker_fee_pct=0.0, taker_fee_pct=0.0, taker_slippage_pct=0.0):
+    """
+    ربات زنده: کندل‌های ۱ دقیقه‌ایِ بسته‌شده‌ی جدید رو روی پوزیشن‌های باز این نماد اعمال
+    می‌کنه (همون step_bar بک‌تست). bars: لیست (open_ms, o, h, l, c) مرتب.
+    آخرین کندل پردازش‌شده‌ی هر پوزیشن توی دیتابیس ذخیره می‌شه، پس اگه ربات مدتی
+    خاموش بوده، بعد از روشن شدن هیچ برخورد به SL/TP ای جا نمی‌افته.
+    """
+    rows = conn.execute(
+        "SELECT id, side, entry, sl, tp, initial_sl, peak_price, size, trailing_enabled, open_time, last_bar_ts "
+        "FROM trades WHERE symbol=? AND status='OPEN'", (symbol,)
+    ).fetchall()
+    if not rows or not bars:
+        return
+    for (trade_id, side, entry, sl, tp, initial_sl, peak, size, trailing, open_time, last_bar_ts) in rows:
+        trailing = bool(trailing)
+        peak = peak if peak is not None else entry
+        initial_sl = initial_sl if initial_sl is not None else sl
+        open_ms = int(datetime.fromisoformat(open_time).timestamp() * 1000) if open_time else 0
+        # کندلی که قبل از لحظه‌ی باز شدن پوزیشن شروع شده رو حساب نکن (فقط ثانیه‌های بعدش مهمه)
+        min_start = max(open_ms - (open_ms % 60_000), (last_bar_ts or -1) + 1)
+        closed = False
+        for (bar_open_ms, o, h, l, c) in bars:
+            if bar_open_ms < min_start:
+                continue
+            hit, price, kind, level, sl, peak = step_bar(side, entry, initial_sl, sl, tp, peak, trailing,
+                                                         o, h, l, c, ladder, beyond_distance_r)
+            last_bar_ts = bar_open_ms
+            if hit:
+                exit_type = classify_exit_level(kind, level, initial_sl, entry, trailing)
+                _close_trade_row(conn, trade_id, side, entry, size, price, exit_type, start_balance,
+                                 maker_fee_pct, taker_fee_pct, taker_slippage_pct,
+                                 as_of=datetime.utcfromtimestamp((bar_open_ms + 60_000) / 1000))
+                closed = True
+                break
+        if not closed:
+            conn.execute("UPDATE trades SET sl=?, peak_price=?, last_bar_ts=? WHERE id=?",
+                         (sl, peak, last_bar_ts, trade_id))
+    conn.commit()
+
+
+def _close_trade_row(conn, trade_id, side, entry, size, close_price, exit_type, start_balance,
+                     maker_fee_pct, taker_fee_pct, taker_slippage_pct, as_of=None):
+    balance = get_balance(conn, start_balance, as_of=as_of)
+    pnl_gross = (close_price - entry) * size if side == "LONG" else (entry - close_price) * size
+    fee_cost, _, _, _ = _fee_for_exit(entry, close_price, size, exit_type,
+                                       maker_fee_pct, taker_fee_pct, taker_slippage_pct)
+    pnl_net = pnl_gross - fee_cost
+    balance += pnl_net
+    result = "WIN" if pnl_net >= 0 else "LOSS"
+    conn.execute("""
+        UPDATE trades SET status='CLOSED', close_time=?, close_price=?, pnl=?, fee_cost=?,
+                           exit_type=?, result=?
+        WHERE id=?
+    """, (_now(as_of).isoformat(), close_price, pnl_net, fee_cost, exit_type, result, trade_id))
+    conn.commit()
+    record_equity(conn, balance, as_of=as_of)
+    return pnl_net
 
 
 # ==================== بستن پوزیشن (خودکار یا دستی) ====================

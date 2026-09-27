@@ -13,6 +13,11 @@ else
   echo "⚠️  هنوز دیتابیسی ساخته نشده (ربات هنوز هیچ معامله‌ای ثبت نکرده)."
 fi
 
+# گزارش‌های مقایسه‌ی استراتژی‌ها هم (کوچیکن و برای تحلیل بعدی مفیدن)
+if ls reports/compare_*.json >/dev/null 2>&1; then
+  FILES_TO_BACKUP="$FILES_TO_BACKUP $(ls reports/compare_*.json | tr '\n' ' ')"
+fi
+
 tar -czf "backups/backup_${TIMESTAMP}.tar.gz" $FILES_TO_BACKUP
 echo "✅ بکاپ ساخته شد: backups/backup_${TIMESTAMP}.tar.gz"
 echo ""

@@ -133,6 +133,24 @@
     border-radius:6px; padding:5px 12px; font-size:12px; cursor:pointer;
   }
   .pager button:disabled{opacity:.4; cursor:not-allowed;}
+  .pbar{width:100%; max-width:520px; height:10px; background:#1c2531; border-radius:6px; overflow:hidden;}
+  .pbar-fill{height:100%; background:var(--accent); transition:width .5s; width:0%;}
+  .rec-card{border-radius:12px; padding:16px; margin-bottom:14px; border:1px solid var(--border); background:#0a0e14;}
+  .rec-card.robust{border-color:rgba(63,185,80,.5); background:rgba(63,185,80,.06);}
+  .rec-card.failed_oos, .rec-card.none{border-color:rgba(210,153,34,.5); background:rgba(210,153,34,.06);}
+  .rec-title{font-size:15px; font-weight:800; margin:6px 0 10px;}
+  .mini{font-size:12px;} .mini td,.mini th{padding:6px 8px;}
+  .num-pos{color:var(--green);} .num-neg{color:var(--red);}
+  .opt-grid{display:flex; flex-wrap:wrap; gap:8px 18px;}
+  .opt-grid .switch-label{font-size:12px;}
+  .tip{color:var(--muted); font-size:11px; cursor:help; border-bottom:1px dotted var(--muted);}
+  .method{color:var(--muted); font-size:11.5px; line-height:1.9; margin-top:8px;}
+  .panel, .rec-card{overflow-x:auto;}
+  .cols2 > *, .grid > *{min-width:0;}
+  .topbar{flex-wrap:wrap; gap:10px;}
+  .scrollbox{overflow-x:auto;}
+  .controls-row select, .controls-row input{max-width:100%;}
+  @media(max-width:640px){ .wrap{padding:14px 10px;} .panel{padding:12px;} .opt-grid{flex-direction:column;} }
   @media(max-width:1100px){ .grid{grid-template-columns:repeat(3,1fr);} .cols2{grid-template-columns:1fr;} }
   @media(max-width:640px){ .grid{grid-template-columns:repeat(2,1fr);} .top-right{gap:10px;} .meter{min-width:70px;} .meter-bar{width:60px;} }
 </style>
@@ -235,10 +253,20 @@
         <label>استراتژی‌های فعال:</label>
         <span id="strategyChecks"></span>
         <label style="margin-right:14px;">حالت ترکیب:</label>
-        <select id="combineModeSelect" style="width:140px;">
+        <select id="combineModeSelect" style="width:230px;">
           <option value="any">هر کدوم کافیه (any)</option>
-          <option value="all">همه باید موافق باشن (all)</option>
+          <option value="confirm">اولی ماشه، بقیه تایید در چند کندل اخیر (confirm)</option>
+          <option value="all">همه روی همون کندل (all — خیلی نادر)</option>
         </select>
+      </div>
+      <div class="controls-row" style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border);">
+        <label>بهبودهای قابل‌آزمایش:</label>
+        <div class="opt-grid">
+          <label class="switch-label" title="اگه SL خیلی نزدیک باشه، عقب‌تر برده می‌شه (حجم خودکار کم می‌شه، ریسک دلاری ثابت می‌مونه)"><input type="checkbox" id="optMinSl"> حداقل فاصله‌ی حد ضرر <span class="tip" id="optMinSlTip"></span></label>
+          <label class="switch-label" title="اگه مقاومت/حمایت مقابل زودتر از هدف R:R سر راه باشه، معامله باز نمی‌شه"><input type="checkbox" id="optRoom"> شرط فضای کافی تا هدف</label>
+          <label class="switch-label" title="خرید فقط وقتی روند ۴ساعته‌ی BTC نزولی نیست؛ فروش فقط وقتی صعودی نیست"><input type="checkbox" id="optBtc"> فیلتر روند بیت‌کوین</label>
+          <label class="switch-label"><input type="checkbox" id="optLongOnly"> فقط خرید (بدون فروش)</label>
+        </div>
       </div>
     </div>
 
@@ -329,6 +357,71 @@
       <div class="pager" id="signalLogPager"></div>
     </div>
 
+    <!-- ==================== مقایسه‌ی خودکار استراتژی‌ها ==================== -->
+    <div class="panel" id="comparePanel">
+      <div class="panel-head">
+        <h2>🏆 مقایسه‌ی خودکار استراتژی‌ها و انتخاب بهترین</h2>
+        <span class="hint">صدها ترکیب (استراتژی × سخت‌گیری × تریلینگ × بهبودها) روی همون دیتای تاریخی، با اعتبارسنجی روی دیتای دیده‌نشده</span>
+      </div>
+      <div class="controls-row">
+        <label>بازه:</label>
+        <select id="cmpDays">
+          <option value="180">۶ ماه</option>
+          <option value="365">۱ سال</option>
+          <option value="730" selected>۲ سال</option>
+        </select>
+        <label>تعداد نماد (پرحجم‌ترین‌ها):</label>
+        <select id="cmpTopN">
+          <option value="10">۱۰</option>
+          <option value="20" selected>۲۰</option>
+          <option value="30">۳۰</option>
+          <option value="40">۴۰</option>
+        </select>
+        <label>دامنه:</label>
+        <select id="cmpGrid" style="width:260px;">
+          <option value="quick" selected>سریع — حدود ۷۰۰ تنظیم (چند دقیقه)</option>
+          <option value="full">کامل — حدود ۳۲۰۰ تنظیم (۵-۱۵ دقیقه)</option>
+        </select>
+        <button id="cmpStartBtn" class="btn btn-save">▶ شروع مقایسه</button>
+        <span id="cmpMsg" style="font-size:12px;"></span>
+      </div>
+      <div class="controls-row" id="cmpProgressRow" style="display:none; flex-direction:column; align-items:flex-start;">
+        <div class="pbar"><div class="pbar-fill" id="cmpPbar"></div></div>
+        <span class="hint">⏳ <b id="cmpProgressText">در حال اجرا...</b></span>
+        <span class="hint">بار اول دانلود دیتا چند دقیقه طول می‌کشه؛ دفعه‌های بعد از کش محلی خونده می‌شه و خیلی سریع‌تره. می‌تونی صفحه رو ببندی — نتیجه ذخیره می‌شه.</span>
+      </div>
+      <div class="controls-row">
+        <label>گزارش‌های قبلی:</label>
+        <select id="cmpReports" style="width:420px;"><option value="">—</option></select>
+        <span class="hint" id="cmpCacheInfo"></span>
+      </div>
+
+      <div id="cmpResults" style="display:none; margin-top:12px;">
+        <div id="cmpRec"></div>
+
+        <div class="panel" style="background:#0a0e14;">
+          <div class="panel-head"><h2>مقایسه با تنظیمات خودت</h2><span class="hint">همون بازه و همون نمادها</span></div>
+          <div class="scrollbox" style="max-height:none;"><table class="mini" id="cmpBaselines"></table></div>
+        </div>
+
+        <div class="panel" style="background:#0a0e14;">
+          <div class="panel-head"><h2>هر بهبود واقعاً کمک می‌کنه؟</h2><span class="hint">مقایسه‌ی جفتی: دو تنظیم که فقط در همون مورد فرق دارن</span></div>
+          <div class="scrollbox" style="max-height:none;"><table class="mini" id="cmpImprovements"></table></div>
+        </div>
+
+        <div class="panel" style="background:#0a0e14;">
+          <div class="panel-head"><h2>کدوم استراتژی اصلاً لبه داره؟</h2><span class="hint">بهترین نتیجه‌ی هر ترکیب استراتژی</span></div>
+          <div class="scrollbox" style="max-height:360px;"><table class="mini" id="cmpStrategies"></table></div>
+        </div>
+
+        <div class="panel" style="background:#0a0e14;">
+          <div class="panel-head"><h2>۳۰ تنظیم برتر (رتبه‌بندی فقط با بخش آموزش)</h2><span class="hint">ستون «آزمون» = نتیجه روی ۳۰٪ آخر بازه که در انتخاب دخالت نداشته</span></div>
+          <div class="scrollbox" style="max-height:480px;"><table class="mini" id="cmpTop"></table></div>
+        </div>
+        <div class="method" id="cmpMethod"></div>
+      </div>
+    </div>
+
     <!-- ==================== بک‌تست ==================== -->
     <div class="panel">
       <div class="panel-head">
@@ -348,6 +441,19 @@
         <label>سطح سخت‌گیری:</label>
         <select id="btStrictness" style="width:210px;"></select>
         <label class="switch-label"><input type="checkbox" id="btTrailing"> تریلینگ استاپ</label>
+      </div>
+      <div class="controls-row">
+        <label>بهبودها:</label>
+        <div class="opt-grid">
+          <label class="switch-label"><input type="checkbox" id="btMinSl"> حداقل فاصله‌ی SL</label>
+          <label class="switch-label"><input type="checkbox" id="btRoom"> فضای کافی تا هدف</label>
+          <label class="switch-label"><input type="checkbox" id="btBtc"> فیلتر BTC</label>
+          <label class="switch-label"><input type="checkbox" id="btLongOnly"> فقط خرید</label>
+        </div>
+        <label style="margin-right:14px;">حالت ترکیب:</label>
+        <select id="btCombine" style="width:150px;">
+          <option value="any">any</option><option value="confirm">confirm</option><option value="all">all</option>
+        </select>
       </div>
       <div class="controls-row">
         <label>استراتژی‌ها:</label>
@@ -372,6 +478,10 @@
           <div class="card"><div class="label">بازده کل</div><div class="value" id="btReturn">—</div></div>
           <div class="card"><div class="label">بیشینه افت سرمایه</div><div class="value" id="btMaxDD">—</div></div>
           <div class="card"><div class="label">Sharpe (تخمینی)</div><div class="value" id="btSharpe">—</div></div>
+        </div>
+        <div class="panel" style="background:#0a0e14;" id="btSegmentsBox">
+          <div class="panel-head"><h2>ثبات در زمان: ۷۰٪ اول بازه در برابر ۳۰٪ آخر</h2><span class="hint">اگه فقط یکی خوب باشه، نتیجه احتمالاً شانسی/وابسته به یک دوره‌ی خاص بازاره</span></div>
+          <table class="mini" id="btSegments"></table>
         </div>
 
         <div class="panel" style="background:#0a0e14;">
@@ -496,6 +606,7 @@ function exitTypeBadge(et){
   const map = {
     TP: ['برخورد به TP', 'tp'], SL: ['برخورد به SL اولیه', 'sl'],
     TRAIL_SL: ['تریلینگ', 'trail'], BREAKEVEN: ['سربه‌سر', 'breakeven'], MANUAL: ['دستی', 'manual'],
+    END: ['پایان دیتا (باز مونده)', 'manual'],
   };
   const [label, cls] = map[et] || [et || '—', 'manual'];
   return `<span class="badge ${cls}">${label}</span>`;
@@ -532,6 +643,17 @@ document.getElementById('trailingToggle').addEventListener('change', async (e) =
     body: JSON.stringify({ trailing_enabled: e.target.checked })
   });
   refresh();
+});
+
+const OPT_KEYS = {optMinSl: 'min_sl', optRoom: 'room', optBtc: 'btc_filter', optLongOnly: 'long_only'};
+Object.entries(OPT_KEYS).forEach(([id, key]) => {
+  document.getElementById(id).addEventListener('change', async (e) => {
+    await fetch('/api/control', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ [key]: e.target.checked })
+    });
+    refresh();
+  });
 });
 
 document.getElementById('combineModeSelect').addEventListener('change', async (e) => {
@@ -687,6 +809,10 @@ async function refresh(){
     ).join(' | ') + ` | بعد از آخرین پله: فاصله‌ی ثابت ${data.trailing_beyond_r}R پشت بیشینه`;
 
     document.getElementById('combineModeSelect').value = data.combine_mode;
+    Object.entries(OPT_KEYS).forEach(([id, key]) => {
+      if(document.activeElement.id !== id) document.getElementById(id).checked = !!data[key];
+    });
+    document.getElementById('optMinSlTip').innerText = `(حداقل ${data.test_min_sl_pct}٪ و ${data.test_min_sl_atr}×ATR)`;
     renderStrategyChecks('strategyChecks', data.available_strategies, data.active_strategies, saveActiveStrategies);
 
     // پنل کنترل
@@ -858,7 +984,12 @@ document.getElementById('btStartBtn').addEventListener('click', async () => {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({
       days, top_n: topN, strictness,
-      overrides: { USE_TRAILING_SL: trailing, ACTIVE_STRATEGIES: btActiveStrategies },
+      min_sl: document.getElementById('btMinSl').checked,
+      room: document.getElementById('btRoom').checked,
+      btc_filter: document.getElementById('btBtc').checked,
+      long_only: document.getElementById('btLongOnly').checked,
+      overrides: { USE_TRAILING_SL: trailing, ACTIVE_STRATEGIES: btActiveStrategies,
+                   STRATEGY_COMBINE_MODE: document.getElementById('btCombine').value },
     })
   });
   const data = await res.json();
@@ -959,6 +1090,18 @@ function renderBacktestResult(r){
     r.by_month.map(m => `<tr><td dir="ltr">${m.month}</td><td>${m.trades}</td><td>${m.win_rate}%</td>
     <td class="${m.pnl>=0?'green':'red'}">${m.pnl>=0?'+':''}${m.pnl}</td></tr>`).join('') + '</tbody></table>';
 
+  const seg = r.segments;
+  document.getElementById('btSegmentsBox').style.display = seg ? 'block' : 'none';
+  if(seg){
+    const row = (name, m) => `<tr><td>${name}</td><td>${m.trades}</td><td>${m.win_rate}%</td>
+      <td class="${m.avg_r>=0?'num-pos':'num-neg'}" dir="ltr">${m.avg_r>=0?'+':''}${m.avg_r.toFixed(3)}R</td>
+      <td>${m.profit_factor}</td><td class="${m.return_pct>=0?'num-pos':'num-neg'}" dir="ltr">${m.return_pct>=0?'+':''}${m.return_pct}%</td>
+      <td>${m.max_dd_pct}%</td><td>${m.pos_months_pct}%</td></tr>`;
+    document.getElementById('btSegments').innerHTML = `<thead><tr><th>بخش</th><th>معاملات</th><th>وین‌ریت</th>
+      <th>میانگین R (بعد از کارمزد)</th><th>ضریب سود</th><th>بازده</th><th>بیشینه افت</th><th>ماه‌های سودده</th></tr></thead><tbody>` +
+      row('۷۰٪ اول', seg.first_70) + row('۳۰٪ آخر', seg.last_30) + row('کل', seg.full) + '</tbody>';
+  }
+
   loadBacktestTrades(1);
   loadBacktestSignals(1);
 }
@@ -1003,6 +1146,197 @@ async function loadBacktestSignals(page){
     renderPager('btSignalsPager', data.page, data.page_size, data.total, loadBacktestSignals);
   }catch(e){ console.error(e); }
 }
+
+
+// ==================== مقایسه‌ی خودکار استراتژی‌ها ====================
+let cmpPollTimer = null;
+let cmpCurrentReport = null;
+const STRICT_LABEL = {loose:'سبک‌گیر', normal:'معمولی', strict:'سخت‌گیر', very_strict:'خیلی سخت‌گیر'};
+
+function rCell(v){ if(v===null||v===undefined) return '—'; return `<span class="${v>=0?'num-pos':'num-neg'}" dir="ltr">${v>=0?'+':''}${Number(v).toFixed(3)}R</span>`; }
+function pctCell(v){ if(v===null||v===undefined) return '—'; return `<span class="${v>=0?'num-pos':'num-neg'}" dir="ltr">${v>=0?'+':''}${fmt(v,1)}%</span>`; }
+function segCells(m){
+  return `<td>${m.trades}</td><td>${m.win_rate}%</td><td>${rCell(m.avg_r)}</td><td>${m.profit_factor}</td><td>${pctCell(m.return_pct)}</td><td>${m.max_dd_pct}%</td>`;
+}
+
+document.getElementById('cmpStartBtn').addEventListener('click', async () => {
+  const msg = document.getElementById('cmpMsg');
+  const res = await fetch('/api/compare/start', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      days: parseInt(document.getElementById('cmpDays').value),
+      top_n: parseInt(document.getElementById('cmpTopN').value),
+      grid: document.getElementById('cmpGrid').value,
+    })
+  });
+  const data = await res.json();
+  if(!data.ok){
+    msg.innerText = 'خطا: ' + (data.error || ''); msg.style.color = 'var(--red)';
+    if(data.job_id) pollCompare(data.job_id);
+    return;
+  }
+  msg.innerText = '';
+  pollCompare(data.job_id);
+});
+
+function pollCompare(jobId){
+  document.getElementById('cmpProgressRow').style.display = 'flex';
+  document.getElementById('cmpStartBtn').disabled = true;
+  if(cmpPollTimer) clearInterval(cmpPollTimer);
+  const tick = async () => {
+    try{
+      const res = await fetch(`/api/compare/status/${jobId}`);
+      const st = await res.json();
+      if(!st.ok) return;
+      document.getElementById('cmpPbar').style.width = Math.round((st.progress||0)*100) + '%';
+      document.getElementById('cmpProgressText').innerText = `${Math.round((st.progress||0)*100)}٪ — ${st.message || st.state}`;
+      if(st.state === 'done'){
+        clearInterval(cmpPollTimer);
+        document.getElementById('cmpProgressRow').style.display = 'none';
+        document.getElementById('cmpStartBtn').disabled = false;
+        await loadCompareList(jobId);
+        loadCompareReport(jobId);
+      } else if(st.state === 'error'){
+        clearInterval(cmpPollTimer);
+        document.getElementById('cmpProgressRow').style.display = 'none';
+        document.getElementById('cmpStartBtn').disabled = false;
+        const msg = document.getElementById('cmpMsg');
+        msg.innerText = st.message || 'خطا'; msg.style.color = 'var(--red)';
+      }
+    }catch(e){ console.error(e); }
+  };
+  tick();
+  cmpPollTimer = setInterval(tick, 2500);
+}
+
+async function loadCompareList(selectId){
+  try{
+    const res = await fetch('/api/compare/list');
+    const data = await res.json();
+    const sel = document.getElementById('cmpReports');
+    sel.innerHTML = '<option value="">— انتخاب گزارش —</option>' + data.reports.map(r => {
+      const d = r.created_at ? new Date(r.created_at+'Z').toLocaleString('fa-IR') : '';
+      const st = r.status === 'robust' ? '✓' : (r.status === 'failed_oos' ? '✗' : '·');
+      return `<option value="${r.job_id}">${st} ${d} — ${r.days} روز، ${r.symbols} نماد، ${r.n_configs} تنظیم</option>`;
+    }).join('');
+    if(selectId) sel.value = selectId;
+    if(data.running_job && !cmpPollTimer) pollCompare(data.running_job);
+    const c = await (await fetch('/api/data_cache')).json();
+    if(c.ok) document.getElementById('cmpCacheInfo').innerText = `کش دیتا: ${c.symbols} نماد، ${c.size_mb} مگابایت`;
+    return data;
+  }catch(e){ console.error(e); }
+}
+document.getElementById('cmpReports').addEventListener('change', (e) => { if(e.target.value) loadCompareReport(e.target.value); });
+
+async function loadCompareReport(jobId){
+  const res = await fetch(`/api/compare/result/${jobId}`);
+  const data = await res.json();
+  if(!data.ok) return;
+  cmpCurrentReport = data.report;
+  renderCompareReport(data.report);
+}
+
+function configButtons(idx, source){
+  return `<button class="link-btn" onclick="applyCompareConfig('${source}', ${idx})">اعمال روی ربات</button> ·
+          <button class="link-btn" onclick="backtestCompareConfig('${source}', ${idx})">بک‌تست کامل</button>`;
+}
+function pickConfig(source, idx){
+  const r = cmpCurrentReport;
+  if(source === 'best') return r.recommendation.best.config;
+  if(source === 'fallback') return r.recommendation.fallback.config;
+  if(source === 'top') return r.top[idx].config;
+  if(source === 'base') return r.baselines[idx].config;
+  return null;
+}
+async function applyCompareConfig(source, idx){
+  const conf = pickConfig(source, idx);
+  if(!conf) return;
+  if(!confirm('این تنظیم روی ربات زنده (مجازی) اعمال بشه؟ فقط روی سیگنال‌ها و پوزیشن‌های بعدی اثر داره.')) return;
+  const res = await fetch('/api/compare/apply', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({config: conf})});
+  const data = await res.json();
+  alert(data.ok ? '✓ اعمال شد. از این به بعد ربات با همین تنظیم کار می‌کنه.' : ('خطا: ' + (data.error||'')));
+  refresh();
+}
+function backtestCompareConfig(source, idx){
+  const conf = pickConfig(source, idx);
+  if(!conf) return;
+  const m = cmpCurrentReport.meta;
+  document.getElementById('btDays').value = String(m.days >= 700 ? 730 : (m.days >= 360 ? 365 : 180));
+  document.getElementById('btTopN').value = m.symbols.length;
+  document.getElementById('btStrictness').value = conf.strictness;
+  document.getElementById('btTrailing').checked = conf.trailing;
+  document.getElementById('btMinSl').checked = conf.min_sl;
+  document.getElementById('btRoom').checked = conf.room;
+  document.getElementById('btBtc').checked = conf.btc_filter;
+  document.getElementById('btLongOnly').checked = conf.long_only;
+  document.getElementById('btCombine').value = conf.combine_mode;
+  btActiveStrategies = [...conf.active_strategies];
+  document.querySelectorAll('#btStrategyChecks input[type=checkbox]').forEach(cb => { cb.checked = btActiveStrategies.includes(cb.dataset.strategy); });
+  document.getElementById('btStartBtn').scrollIntoView({behavior:'smooth', block:'center'});
+  document.getElementById('btStartBtn').click();
+}
+
+function renderCompareReport(r){
+  document.getElementById('cmpResults').style.display = 'block';
+  const m = r.meta, rec = r.recommendation;
+  const dt = ms => new Date(ms).toLocaleDateString('fa-IR');
+  const segTable = (x) => `
+    <table class="mini"><thead><tr><th>بخش</th><th>معاملات</th><th>وین‌ریت</th><th>میانگین R</th><th>ضریب سود</th><th>بازده</th><th>بیشینه افت</th></tr></thead><tbody>
+      <tr><td>آموزش (${dt(m.start_ms)} تا ${dt(m.split_ms)})</td>${segCells(x.is)}</tr>
+      <tr><td><b>آزمون — دیده‌نشده</b> (${dt(m.split_ms)} تا ${dt(m.end_ms)})</td>${segCells(x.oos)}</tr>
+      <tr><td>کل بازه</td>${segCells(x.full)}</tr>
+    </tbody></table>`;
+  const badge = {robust:'✅ برنده در دیتای دیده‌نشده هم سودده موند', failed_oos:'⚠️ برنده در دیتای دیده‌نشده رد شد', none:'⚠️ دیتای کافی نبود'}[rec.status] || '';
+  let html = `<div class="rec-card ${rec.status}"><div class="hint">${badge}</div>`;
+  if(rec.best){
+    html += `<div class="rec-title">${rec.best.label}</div>${segTable(rec.best)}
+      <div style="margin-top:8px;">${configButtons(0,'best')}</div>`;
+  }
+  html += `<div class="method" style="color:var(--text);">${rec.text}</div>`;
+  if(rec.fallback){
+    html += `<div style="margin-top:12px; padding-top:10px; border-top:1px solid var(--border);">
+      <div class="hint">گزینه‌ی جایگزین (با احتیاط):</div><div class="rec-title">${rec.fallback.label}</div>
+      ${segTable(rec.fallback)}<div style="margin-top:8px;">${configButtons(0,'fallback')}</div></div>`;
+  }
+  html += `</div>`;
+  document.getElementById('cmpRec').innerHTML = html;
+
+  document.getElementById('cmpBaselines').innerHTML = `<thead><tr><th>تنظیم</th><th>آموزش: معاملات</th><th>میانگین R</th><th>آزمون: معاملات</th><th>میانگین R</th><th>ضریب سود</th><th>بازده کل</th><th>افت کل</th><th></th></tr></thead><tbody>` +
+    (r.baselines||[]).map((b,i) => b.error ? `<tr><td>${b.name}</td><td colspan="8">${b.error}</td></tr>` : `<tr>
+      <td><b>${b.name}</b><br><span class="hint">${b.label}</span></td>
+      <td>${b.is.trades}</td><td>${rCell(b.is.avg_r)}</td><td>${b.oos.trades}</td><td>${rCell(b.oos.avg_r)}</td>
+      <td>${b.full.profit_factor}</td><td>${pctCell(b.full.return_pct)}</td><td>${b.full.max_dd_pct}%</td>
+      <td><button class="link-btn" onclick="backtestCompareConfig('base', ${i})">بک‌تست کامل</button></td></tr>`).join('') + '</tbody>';
+
+  document.getElementById('cmpImprovements').innerHTML = `<thead><tr><th>مورد</th><th>تعداد جفت</th><th>درصد مواردی که بهتر شد</th><th>تغییر میانه‌ی R (کل)</th><th>تغییر میانه‌ی R (آزمون)</th><th>تغییر میانه‌ی بازده</th></tr></thead><tbody>` +
+    (r.improvements||[]).map(e => `<tr><td>${e.label}</td><td>${e.pairs}</td>
+      <td><b class="${e.improved_pct>=60?'num-pos':(e.improved_pct<=40?'num-neg':'')}">${e.improved_pct}%</b></td>
+      <td>${rCell(e.median_delta_r)}</td><td>${rCell(e.median_delta_r_oos)}</td><td>${pctCell(e.median_delta_return_pct)}</td></tr>`).join('') + '</tbody>';
+
+  document.getElementById('cmpStrategies').innerHTML = `<thead><tr><th>ترکیب استراتژی</th><th>٪ تنظیم‌های سودده</th><th>بهترین تنظیمش</th><th>آموزش R</th><th>آزمون: معاملات</th><th>آزمون R</th><th>آزمون بازده</th></tr></thead><tbody>` +
+    (r.strategy_summary||[]).map(x => `<tr><td>${x.label}</td><td>${x.positive_share_pct}%</td>
+      <td class="hint" style="white-space:normal; max-width:340px;">${x.best_label}</td>
+      <td>${rCell(x.best_is.avg_r)}</td><td>${x.best_oos.trades}</td><td>${rCell(x.best_oos.avg_r)}</td><td>${pctCell(x.best_oos.return_pct)}</td></tr>`).join('') + '</tbody>';
+
+  document.getElementById('cmpTop').innerHTML = `<thead><tr><th>#</th><th>تنظیم</th><th>آموزش: معاملات</th><th>وین‌ریت</th><th>R</th><th>کران پایین R</th>
+      <th>آزمون: معاملات</th><th>وین‌ریت</th><th>R</th><th>ضریب سود</th><th>بازده</th><th>افت</th><th>قبول؟</th><th></th></tr></thead><tbody>` +
+    r.top.map((x,i) => `<tr><td>${i+1}</td><td style="white-space:normal; max-width:360px;">${x.label}</td>
+      <td>${x.is.trades}</td><td>${x.is.win_rate}%</td><td>${rCell(x.is.avg_r)}</td><td>${rCell(x.is.r_lcb)}</td>
+      <td>${x.oos.trades}</td><td>${x.oos.win_rate}%</td><td>${rCell(x.oos.avg_r)}</td><td>${x.oos.profit_factor}</td><td>${pctCell(x.oos.return_pct)}</td><td>${x.oos.max_dd_pct}%</td>
+      <td>${x.eligible ? (x.oos_ok ? '✅' : '❌') : '<span class="hint">کم‌نمونه</span>'}</td><td>${configButtons(i,'top')}</td></tr>`).join('') + '</tbody>';
+
+  const failed = Object.entries(m.data||{}).filter(([k,v]) => !v.ok).map(([k,v]) => `${k} (${v.error})`);
+  document.getElementById('cmpMethod').innerHTML = `
+    <b>روش:</b> ${m.n_configs} تنظیم روی ${m.symbols.length} نماد و ${m.days} روز دیتای کندل ${'۱۵ دقیقه‌ای'} در ${fmt(m.total_elapsed_sec||m.elapsed_sec,0)} ثانیه اجرا شد.
+    بازه به دو بخش تقسیم شد: ۷۰٪ اول برای «انتخاب» و ۳۰٪ آخر فقط برای «آزمون». رتبه‌بندی با کران پایین ۹۵٪ میانگین R هر معامله (بعد از کارمزد
+    میکر ${m.fees?.maker}% / تیکر ${m.fees?.taker}% + اسلیپیج ${m.fees?.slippage}%) انجام شد؛ تنظیمی که کمتر از ${m.min_is_trades} معامله در بخش آموزش
+    یا ${m.min_oos_trades} معامله در بخش آزمون داشته، قابل‌انتخاب نیست. حد ضرر/سود با سایه‌ی کندل و فرض بدبینانه (اگه یک کندل هر دو رو لمس کنه، اول ضرر) حساب شده.
+    <br><b>هشدار صادقانه:</b> هرچی تعداد تنظیم‌های آزمایش‌شده بیشتر باشه، احتمال این‌که برنده فقط «خوش‌شانس» بوده بیشتره — برای همین نتیجه‌ی بخش آزمون از رتبه‌ی بخش آموزش مهم‌تره،
+    و حتی برنده‌ی قبول‌شده هم باید قبل از پول واقعی، روی ربات زنده (مجازی) حداقل ۱۰۰ معامله نتیجه‌ی مشابه بده. نمادها بر اساس حجم امروز انتخاب شدن (سوگیری بقا: ارزهایی که در این دو سال مُردن، در تست نیستن).
+    ${failed.length ? '<br><b>نمادهای بدون دیتا:</b> ' + failed.join('، ') : ''}`;
+}
+
+loadCompareList();
 
 initBacktestControls();
 refresh();

@@ -32,6 +32,51 @@ def fetch_ohlcv_with_fallback(symbol, timeframe, limit, exchange_order):
     raise RuntimeError(f"دریافت دیتا برای {symbol} از هیچ‌کدام از صرافی‌ها ممکن نشد: {last_err}")
 
 
+def drop_forming_candle(df, timeframe, now_ms=None):
+    """
+    حذف کندلی که هنوز بسته نشده. سیگنال فقط باید روی کندل‌های بسته‌شده ساخته بشه؛
+    وگرنه مثلاً «کندل تاییدی» وسط تشکیل شدنش صعودی به نظر میاد ولی نزولی بسته می‌شه
+    (یکی از دلایل اصلی تفاوت نتیجه‌ی زنده با بک‌تست و استاپ‌های زودهنگام).
+    """
+    import time as _time
+    import market_data
+    if df is None or len(df) == 0:
+        return df
+    now_ms = now_ms if now_ms is not None else int(_time.time() * 1000)
+    open_ms = df["timestamp"].values.astype("datetime64[ms]").astype("int64")
+    closes = market_data.close_times_ms(open_ms, timeframe)
+    return df[closes <= now_ms].reset_index(drop=True)
+
+
+def fetch_closed_ohlcv(symbol, timeframe, limit, exchange_order):
+    """آخرین `limit` کندلِ بسته‌شده (یکی بیشتر گرفته می‌شه چون آخری معمولاً در حال تشکیله)."""
+    df, ex_name = fetch_ohlcv_with_fallback(symbol, timeframe, limit + 1, exchange_order)
+    df = drop_forming_candle(df, timeframe)
+    return df.tail(limit).reset_index(drop=True), ex_name
+
+
+def fetch_since(symbol, timeframe, since_ms, exchange_order, max_pages=3, limit=1000):
+    """کندل‌ها از since_ms تا الان (برای جبران وقفه‌ها، چند صفحه)؛ شامل کندل در حال تشکیل."""
+    last_err = None
+    for ex_name in exchange_order:
+        try:
+            ex = _get_exchange(ex_name)
+            rows, cursor = [], int(since_ms)
+            for _ in range(max_pages):
+                batch = ex.fetch_ohlcv(symbol, timeframe=timeframe, since=cursor, limit=limit)
+                if not batch:
+                    break
+                rows.extend(batch)
+                if len(batch) < limit:
+                    break
+                cursor = batch[-1][0] + 1
+            return rows, ex_name
+        except Exception as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"دریافت کندل‌های {symbol} ممکن نشد: {last_err}")
+
+
 def is_symbol_allowed(symbol, cfg):
     """
     فیلتر مطلق و همیشگی: این نمادها هیچ‌وقت نباید معامله بشن، فارغ از این‌که از

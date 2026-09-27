@@ -8,14 +8,19 @@
 import io
 import json
 import logging
+import os
+import subprocess
+import sys
 import tarfile
 import threading
+import time
 import uuid
 from datetime import datetime
 
 import psutil
 from flask import Flask, jsonify, render_template, request, send_file
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 import config
 import data_fetcher
@@ -24,6 +29,7 @@ import strategies
 import paper_trader
 import backtest
 import backtest_analyzer
+import market_data
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("tradingbot")
@@ -105,6 +111,14 @@ def get_bot_settings():
 
     combine_mode = paper_trader.get_setting(conn, "strategy_combine_mode", config.STRATEGY_COMBINE_MODE)
 
+    def flag(key, default):
+        return paper_trader.get_setting(conn, key, "1" if default else "0") == "1"
+
+    min_sl = flag("min_sl", getattr(config, "MIN_SL_PCT", 0) > 0 or getattr(config, "MIN_SL_ATR_MULT", 0) > 0)
+    room = flag("room_to_target", getattr(config, "REQUIRE_ROOM_TO_TARGET", False))
+    btc_filter = flag("btc_filter", getattr(config, "BTC_REGIME_FILTER", False))
+    long_only = flag("long_only", not getattr(config, "ALLOW_SHORT", True))
+
     return {
         "running": running,
         "risk_pct": risk_pct,
@@ -115,7 +129,19 @@ def get_bot_settings():
         "trailing_enabled": trailing_enabled,
         "active_strategies": active_strategies,
         "combine_mode": combine_mode,
+        "min_sl": min_sl,
+        "room": room,
+        "btc_filter": btc_filter,
+        "long_only": long_only,
     }
+
+
+def live_config_snapshot(settings=None):
+    """تنظیمات فعلی ربات زنده به همون فرمتی که «مقایسه‌ی استراتژی‌ها» می‌فهمه."""
+    st = settings or get_bot_settings()
+    return {"active_strategies": st["active_strategies"], "combine_mode": st["combine_mode"],
+            "strictness": st["strictness"], "trailing": st["trailing_enabled"], "min_sl": st["min_sl"],
+            "room": st["room"], "btc_filter": st["btc_filter"], "long_only": st["long_only"]}
 
 
 def refresh_symbols_job():
@@ -137,10 +163,11 @@ def refresh_symbols_job():
 
 
 def fetch_symbol_df(symbol, timeframe=None, limit=None):
+    """فقط کندل‌های بسته‌شده (دقیقاً همون چیزی که بک‌تست هم می‌بینه)."""
     timeframe = timeframe or config.TIMEFRAME
     limit = limit or config.CANDLE_LIMIT
     try:
-        df, used_ex = data_fetcher.fetch_ohlcv_with_fallback(
+        df, used_ex = data_fetcher.fetch_closed_ohlcv(
             symbol, timeframe, limit, config.EXCHANGE_TRY_ORDER
         )
         return df
@@ -156,8 +183,28 @@ def get_effective_cfg(settings):
         "MIN_RISK_REWARD": settings["min_rr"],
         "ACTIVE_STRATEGIES": settings["active_strategies"],
         "STRATEGY_COMBINE_MODE": settings["combine_mode"],
+        "MIN_SL_PCT": config.TEST_MIN_SL_PCT if settings["min_sl"] else 0.0,
+        "MIN_SL_ATR_MULT": config.TEST_MIN_SL_ATR_MULT if settings["min_sl"] else 0.0,
+        "REQUIRE_ROOM_TO_TARGET": settings["room"],
     }
     return backtest.build_config(config, overrides)
+
+
+# روند BTC برای فیلتر رژیم بازار — هر اسکن یک‌بار حساب می‌شه، نه برای هر نماد
+btc_regime_state = {"trend": None, "time": 0}
+
+
+def get_btc_regime():
+    now = time.time()
+    if btc_regime_state["trend"] is not None and now - btc_regime_state["time"] < 300:
+        return btc_regime_state["trend"]
+    df = fetch_symbol_df(config.BTC_REGIME_SYMBOL, timeframe=config.BTC_REGIME_TIMEFRAME,
+                         limit=config.HTF_CANDLE_LIMIT)
+    trend = None
+    if df is not None and len(df) >= config.SWING_ORDER * 2 + 5:
+        trend = analysis.trend_from_df(df, swing_order=config.SWING_ORDER)
+    btc_regime_state.update({"trend": trend, "time": now})
+    return trend
 
 
 def check_htf_confirmation(symbol, side, min_agreement):
@@ -196,19 +243,17 @@ def scan_symbol(symbol, settings):
     if not data_fetcher.is_symbol_allowed(symbol, config):
         return  # فیلتر مطلق: طلا و استیبل‌کوین به استیبل‌کوین هیچ‌وقت معامله نمی‌شن
 
-    df = fetch_symbol_df(symbol)
+    # فقط کندل‌های بسته‌شده؛ چند کندل اضافه برای حالت ترکیب «تاییدی»
+    df = fetch_symbol_df(symbol, limit=config.CANDLE_LIMIT + config.CONFIRM_LOOKBACK_BARS)
     if df is None or len(df) < (config.SWING_ORDER * 2 + 5):
         return
     cfg = get_effective_cfg(settings)
     result = strategies.generate_combined_signal(df, cfg)
     latest_analysis[symbol] = result
-
-    current_price = result["price"]
-    latest_prices[symbol] = current_price
-    paper_trader.check_and_close_trades(
-        conn, symbol, current_price, settings["initial_capital"],
-        config.MAKER_FEE_PCT, config.TAKER_FEE_PCT, config.TAKER_SLIPPAGE_PCT,
-    )
+    if symbol not in latest_prices:
+        latest_prices[symbol] = result["price"]
+    # بستن پوزیشن‌ها اینجا انجام نمی‌شه؛ price_check_job هر دقیقه با کندل‌های ۱ دقیقه‌ای
+    # (با سایه‌ها) این کار رو دقیق‌تر انجام می‌ده.
 
     if not result["signal"]:
         return
@@ -231,7 +276,17 @@ def scan_symbol(symbol, settings):
         reject("cooldown")
         return
 
-    # ۲) تایید چند-تایم‌فریمی با سطح سخت‌گیری فعلی (SHORT به تاییدیه‌ی بیشتری نیاز داره)
+    # ۲) جهت مجاز و فیلتر رژیم BTC (هر دو اختیاری، از پنل)
+    if sig["side"] == "SHORT" and settings["long_only"]:
+        reject("side_disabled")
+        return
+    if settings["btc_filter"]:
+        btc_trend = get_btc_regime()
+        if (sig["side"] == "LONG" and btc_trend == "downtrend") or (sig["side"] == "SHORT" and btc_trend == "uptrend"):
+            reject("btc_regime")
+            return
+
+    # ۳) تایید چند-تایم‌فریمی با سطح سخت‌گیری فعلی (SHORT به تاییدیه‌ی بیشتری نیاز داره)
     min_agreement = settings["htf_min_agreement"]
     if sig["side"] == "SHORT":
         min_agreement = min(len(config.HTF_TIMEFRAMES), min_agreement + config.SHORT_EXTRA_HTF_AGREEMENT)
@@ -241,7 +296,7 @@ def scan_symbol(symbol, settings):
         reject("htf_disagreement", htf_agree)
         return
 
-    # ۳) باز کردن پوزیشن مجازی (با رعایت واقعی سرمایه، لوریج ایمن و سقف تنوع)
+    # ۴) باز کردن پوزیشن مجازی (با رعایت واقعی سرمایه، لوریج ایمن و سقف تنوع)
     trade_res = paper_trader.open_trade(
         conn, symbol, sig["side"], sig["entry"], sig["sl"], sig["tp"],
         settings["risk_pct"], settings["initial_capital"],
@@ -279,41 +334,67 @@ def full_scan_job():
 
 
 def price_check_job():
-    # همیشه اجرا می‌شه (حتی وقتی ربات متوقفه) چون باید پوزیشن‌های باز رو مدیریت کنه
-    # فقط نمادهایی که معامله باز دارن رو چک می‌کنه، نه کل لیست بزرگ نمادها (سبک می‌مونه)
+    """
+    هر دقیقه: برای نمادهایی که پوزیشن باز دارن، کندل‌های ۱ دقیقه‌ای جدید (از آخرین کندل
+    پردازش‌شده) گرفته و با همون قانون بک‌تست (paper_trader.step_bar، با سایه‌ی کندل)
+    روی پوزیشن اعمال می‌شن. اگه ربات مدتی خاموش بوده، کندل‌های اون مدت هم جبران می‌شن.
+    """
     settings = get_bot_settings()
     open_symbols = paper_trader.get_open_symbols(conn)
+    now_ms = int(time.time() * 1000)
     for symbol in open_symbols:
         try:
-            df = fetch_symbol_df(symbol)
-            if df is not None:
-                price = float(df["close"].iloc[-1])
-                latest_prices[symbol] = price
+            rows = conn.execute(
+                "SELECT open_time, last_bar_ts FROM trades WHERE symbol=? AND status='OPEN'", (symbol,)
+            ).fetchall()
+            since = now_ms - 5 * 60_000
+            for open_time, last_bar_ts in rows:
+                if last_bar_ts:
+                    since = min(since, int(last_bar_ts) + 1)
+                elif open_time:
+                    o_ms = int(datetime.fromisoformat(open_time).timestamp() * 1000)
+                    since = min(since, o_ms - (o_ms % 60_000))
+            since = max(since, now_ms - 3 * 1000 * 60_000)
+            raw, _ = data_fetcher.fetch_since(symbol, "1m", since, config.EXCHANGE_TRY_ORDER)
+            if not raw:
+                continue
+            latest_prices[symbol] = float(raw[-1][4])  # قیمت لحظه‌ای (کندل در حال تشکیل)
+            closed = [(int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]))
+                      for r in raw if int(r[0]) + 60_000 <= now_ms]
 
-                if settings["trailing_enabled"]:
-                    paper_trader.update_trailing_stops(
-                        conn, symbol, price, config.TRAILING_SL_LADDER, config.TRAILING_SL_BEYOND_DISTANCE_R
-                    )
+            if config.LOG_POSITION_PRICE_HISTORY:
+                for trade_id in paper_trader.get_open_trade_ids(conn, symbol):
+                    paper_trader.log_price_snapshot(conn, trade_id, latest_prices[symbol])
+                paper_trader.commit(conn)
 
-                if config.LOG_POSITION_PRICE_HISTORY:
-                    for trade_id in paper_trader.get_open_trade_ids(conn, symbol):
-                        paper_trader.log_price_snapshot(conn, trade_id, price)
-                    paper_trader.commit(conn)
-
-                paper_trader.check_and_close_trades(
-                    conn, symbol, price, settings["initial_capital"],
-                    config.MAKER_FEE_PCT, config.TAKER_FEE_PCT, config.TAKER_SLIPPAGE_PCT,
-                )
+            paper_trader.process_bars(
+                conn, symbol, closed, settings["initial_capital"],
+                config.TRAILING_SL_LADDER, config.TRAILING_SL_BEYOND_DISTANCE_R,
+                config.MAKER_FEE_PCT, config.TAKER_FEE_PCT, config.TAKER_SLIPPAGE_PCT,
+            )
         except Exception as e:
             log.warning(f"چک قیمت {symbol} با خطا مواجه شد: {e}")
+
+
+def _scan_trigger():
+    """اسکن درست چند ثانیه بعد از بسته شدن هر کندل (نه در زمان دلخواه وسط کندل)."""
+    tf_min = market_data.TF_MS.get(config.TIMEFRAME, 900_000) // 60_000
+    if 0 < tf_min < 60 and 60 % tf_min == 0:
+        return CronTrigger(minute=f"*/{tf_min}", second=8)
+    return None
 
 
 scheduler = BackgroundScheduler()
 scheduler.add_job(refresh_symbols_job, "interval", hours=config.SYMBOL_REFRESH_HOURS,
                    next_run_time=datetime.now())
-scheduler.add_job(full_scan_job, "interval", minutes=config.SCAN_INTERVAL_MINUTES,
-                   next_run_time=datetime.now())
-scheduler.add_job(price_check_job, "interval", minutes=config.PRICE_CHECK_INTERVAL_MINUTES)
+_trig = _scan_trigger()
+if _trig is not None:
+    scheduler.add_job(full_scan_job, _trig, max_instances=1, coalesce=True)
+else:
+    scheduler.add_job(full_scan_job, "interval", minutes=config.SCAN_INTERVAL_MINUTES,
+                      next_run_time=datetime.now(), max_instances=1, coalesce=True)
+scheduler.add_job(price_check_job, "interval", minutes=config.PRICE_CHECK_INTERVAL_MINUTES,
+                   max_instances=1, coalesce=True)
 
 
 @app.route("/")
@@ -392,6 +473,13 @@ def api_data():
         "trailing_beyond_r": config.TRAILING_SL_BEYOND_DISTANCE_R,
         "active_strategies": settings["active_strategies"],
         "combine_mode": settings["combine_mode"],
+        "min_sl": settings["min_sl"],
+        "room": settings["room"],
+        "btc_filter": settings["btc_filter"],
+        "long_only": settings["long_only"],
+        "test_min_sl_pct": config.TEST_MIN_SL_PCT,
+        "test_min_sl_atr": config.TEST_MIN_SL_ATR_MULT,
+        "confirm_lookback_bars": config.CONFIRM_LOOKBACK_BARS,
         "available_strategies": {k: v["label"] for k, v in strategies.STRATEGY_REGISTRY.items()},
         "system": system_stats,
         "stats": stats,
@@ -468,8 +556,14 @@ def api_control():
         paper_trader.set_setting(conn, "active_strategies", json.dumps(chosen))
         log.info(f"[کنترل پنل] استراتژی‌های فعال: {chosen}")
 
+    for key, setting in (("min_sl", "min_sl"), ("room", "room_to_target"),
+                         ("btc_filter", "btc_filter"), ("long_only", "long_only")):
+        if key in body:
+            paper_trader.set_setting(conn, setting, "1" if body[key] else "0")
+            log.info(f"[کنترل پنل] {key}: {'روشن' if body[key] else 'خاموش'}")
+
     if "combine_mode" in body:
-        if body["combine_mode"] in ("any", "all"):
+        if body["combine_mode"] in ("any", "all", "confirm"):
             paper_trader.set_setting(conn, "strategy_combine_mode", body["combine_mode"])
             log.info(f"[کنترل پنل] حالت ترکیب استراتژی‌ها: {body['combine_mode']}")
         else:
@@ -517,10 +611,11 @@ def api_close_trade():
         return jsonify({"ok": False, "error": "پوزیشن باز پیدا نشد"}), 404
     symbol = row[0]
 
-    df = fetch_symbol_df(symbol)
-    if df is None:
+    try:
+        df, _ = data_fetcher.fetch_ohlcv_with_fallback(symbol, "1m", 2, config.EXCHANGE_TRY_ORDER)
+        current_price = float(df["close"].iloc[-1])
+    except Exception:
         return jsonify({"ok": False, "error": "دریافت قیمت لحظه‌ای ناموفق بود"}), 500
-    current_price = float(df["close"].iloc[-1])
 
     settings = get_bot_settings()
     result = paper_trader.close_trade_manually(
@@ -539,6 +634,15 @@ def api_backup():
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         tar.add(config.DB_PATH, arcname="tradingbot.db")
         tar.add("config.py", arcname="config.py")
+        # ۵ گزارش آخر مقایسه‌ی استراتژی‌ها (برای تحلیل بعدی)
+        try:
+            d = _reports_dir()
+            reps = sorted([f for f in os.listdir(d) if f.startswith("compare_") and f.endswith(".json")],
+                          key=lambda f: os.path.getmtime(os.path.join(d, f)), reverse=True)[:5]
+            for f in reps:
+                tar.add(os.path.join(d, f), arcname=f"reports/{f}")
+        except Exception:
+            pass
     buf.seek(0)
     filename = f"backup_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.tar.gz"
     return send_file(buf, as_attachment=True, download_name=filename, mimetype="application/gzip")
@@ -578,6 +682,8 @@ def _run_backtest_job(job_id, symbols, days, overrides):
         conn_bt, meta = backtest.run_backtest(symbols, days, config, overrides, progress_cb)
         cfg_bt = backtest.build_config(config, overrides)
         report = backtest_analyzer.analyze(conn_bt, cfg_bt, meta)
+        report["segments"] = meta.get("segments")
+        report["engine"] = meta.get("engine")
         backtest_jobs[job_id]["result"] = report
         backtest_jobs[job_id]["state"] = "done"
         backtest_jobs[job_id]["progress"] = "تمام شد"
@@ -613,6 +719,8 @@ def api_backtest_start():
         "USE_TRAILING_SL", "TRAILING_SL_LADDER", "TRAILING_SL_BEYOND_DISTANCE_R",
         "ACTIVE_STRATEGIES", "STRATEGY_COMBINE_MODE",
         "BREAKOUT_LOOKBACK", "BREAKOUT_VOLUME_MULT",
+        "MIN_SL_PCT", "MIN_SL_ATR_MULT", "REQUIRE_ROOM_TO_TARGET", "BTC_REGIME_FILTER",
+        "ALLOW_LONG", "ALLOW_SHORT", "CONFIRM_LOOKBACK_BARS", "SHORT_EXTRA_HTF_AGREEMENT",
     }
     overrides = {k: v for k, v in overrides.items() if k in allowed_override_keys}
 
@@ -623,6 +731,19 @@ def api_backtest_start():
         overrides.setdefault("HTF_MIN_AGREEMENT", preset["HTF_MIN_AGREEMENT"])
         overrides.setdefault("MIN_RISK_REWARD", preset["MIN_RISK_REWARD"])
 
+    # میان‌برهای ساده‌ی پنل برای بهبودهای قابل‌آزمایش
+    if body.get("min_sl"):
+        overrides["MIN_SL_PCT"] = config.TEST_MIN_SL_PCT
+        overrides["MIN_SL_ATR_MULT"] = config.TEST_MIN_SL_ATR_MULT
+    if "room" in body:
+        overrides["REQUIRE_ROOM_TO_TARGET"] = bool(body["room"])
+    if "btc_filter" in body:
+        overrides["BTC_REGIME_FILTER"] = bool(body["btc_filter"])
+    if body.get("long_only"):
+        overrides["ALLOW_SHORT"] = False
+
+    if compare_running():
+        return jsonify({"ok": False, "error": "الان «مقایسه‌ی استراتژی‌ها» در حال اجراست؛ بعد از تمام شدنش امتحان کن."}), 409
     with backtest_lock:
         if backtest_running_job["id"] is not None:
             return jsonify({"ok": False, "error": "یک بک‌تست دیگه الان در حال اجراست. صبر کن تمام بشه."}), 409
@@ -696,6 +817,165 @@ def api_backtest_signals(job_id):
         conn_bt, limit=page_size, offset=(page - 1) * page_size, only_rejected=only_rejected
     )
     return jsonify({"ok": True, "signals": signals, "total": total, "page": page, "page_size": page_size})
+
+
+# ==================== مقایسه‌ی خودکار استراتژی‌ها ====================
+# در یک پروسه‌ی جدا با اولویت پایین اجرا می‌شه (compare.py)، تا محاسبات سنگینش ربات زنده
+# و پنل رو کند نکنه. پیشرفت و نتیجه در فایل ذخیره می‌شن، پس بعد از ری‌استارت ربات هم
+# گزارش‌های قبلی در دسترس می‌مونن.
+
+compare_proc = {"proc": None, "job_id": None}
+compare_lock = threading.Lock()
+
+
+def _reports_dir():
+    d = os.path.join(os.path.dirname(os.path.abspath(__file__)), config.REPORTS_DIR)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def compare_running():
+    p = compare_proc["proc"]
+    return p is not None and p.poll() is None
+
+
+def _progress_path(job_id):
+    return os.path.join(_reports_dir(), f"progress_{job_id}.json")
+
+
+def _report_path(job_id):
+    return os.path.join(_reports_dir(), f"compare_{job_id}.json")
+
+
+def _safe_job_id(job_id):
+    return "".join(ch for ch in str(job_id) if ch.isalnum())[:32]
+
+
+@app.route("/api/compare/start", methods=["POST"])
+def api_compare_start():
+    body = request.get_json(force=True, silent=True) or {}
+    days = max(60, min(int(body.get("days", 365)), 1095))
+    top_n = max(3, min(int(body.get("top_n", 20)), 60))
+    grid = "full" if body.get("grid") == "full" else "quick"
+    with compare_lock:
+        if compare_running():
+            return jsonify({"ok": False, "error": "یک مقایسه‌ی دیگه در حال اجراست.",
+                            "job_id": compare_proc["job_id"]}), 409
+        if backtest_running_job["id"] is not None:
+            return jsonify({"ok": False, "error": "یک بک‌تست تکی در حال اجراست؛ صبر کن تمام بشه."}), 409
+        symbols = active_symbols["list"][:top_n] if active_symbols["list"] else list(config.SYMBOLS)[:top_n]
+        job_id = uuid.uuid4().hex[:10]
+        baseline_path = os.path.join(_reports_dir(), f"baseline_{job_id}.json")
+        live_conf = live_config_snapshot()
+        default_conf = {"active_strategies": list(config.ACTIVE_STRATEGIES), "combine_mode": config.STRATEGY_COMBINE_MODE,
+                        "strictness": config.DEFAULT_STRICTNESS, "trailing": bool(config.USE_TRAILING_SL),
+                        "min_sl": False, "room": False, "btc_filter": False, "long_only": False}
+        with open(baseline_path, "w", encoding="utf-8") as f:
+            json.dump([{"name": "تنظیمات فعلی ربات زنده", "config": live_conf},
+                       {"name": "تنظیمات پیش‌فرض", "config": default_conf}], f, ensure_ascii=False)
+        cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "compare.py"),
+               "--days", str(days), "--grid", grid, "--job-id", job_id,
+               "--progress-file", _progress_path(job_id), "--baseline-file", baseline_path,
+               "--symbols", ",".join(symbols)]
+        if os.environ.get("TRADINGBOT_OFFLINE") == "1":
+            cmd.append("--offline")   # فقط برای تست بدون اینترنت
+        log_file = open(os.path.join(_reports_dir(), f"compare_{job_id}.log"), "w")
+
+        def lower_priority():
+            try:
+                os.nice(15)
+            except Exception:
+                pass
+
+        compare_proc["proc"] = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT,
+                                                preexec_fn=lower_priority, close_fds=True)
+        compare_proc["job_id"] = job_id
+    log.info(f"[مقایسه‌ی استراتژی‌ها] شروع شد: {job_id} ({days} روز، {len(symbols)} نماد، {grid})")
+    return jsonify({"ok": True, "job_id": job_id})
+
+
+@app.route("/api/compare/status/<job_id>")
+def api_compare_status(job_id):
+    job_id = _safe_job_id(job_id)
+    path = _progress_path(job_id)
+    if not os.path.exists(path):
+        if os.path.exists(_report_path(job_id)):
+            return jsonify({"ok": True, "state": "done", "progress": 1.0, "message": "تمام شد"})
+        if compare_proc["job_id"] == job_id and compare_running():
+            return jsonify({"ok": True, "state": "running", "progress": 0.0, "message": "در حال شروع"})
+        return jsonify({"ok": False, "error": "پیدا نشد"}), 404
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            st = json.load(f)
+    except Exception:
+        return jsonify({"ok": True, "state": "running", "progress": 0, "message": "در حال شروع"})
+    if st.get("state") == "running" and compare_proc["job_id"] == job_id and not compare_running():
+        st["state"] = "error"
+        st["message"] = "پروسه‌ی مقایسه به‌طور غیرمنتظره متوقف شد (احتمالاً کمبود رم). تعداد نمادها رو کمتر کن."
+    return jsonify({"ok": True, **{k: v for k, v in st.items() if k != "error"}, "error": st.get("error")})
+
+
+@app.route("/api/compare/result/<job_id>")
+def api_compare_result(job_id):
+    path = _report_path(_safe_job_id(job_id))
+    if not os.path.exists(path):
+        return jsonify({"ok": False, "error": "گزارش پیدا نشد"}), 404
+    with open(path, "r", encoding="utf-8") as f:
+        return jsonify({"ok": True, "report": json.load(f)})
+
+
+@app.route("/api/compare/list")
+def api_compare_list():
+    items = []
+    d = _reports_dir()
+    for name in os.listdir(d):
+        if not (name.startswith("compare_") and name.endswith(".json")):
+            continue
+        path = os.path.join(d, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                rep_ = json.load(f)
+            m = rep_.get("meta", {})
+            rec = rep_.get("recommendation", {})
+            items.append({"job_id": m.get("job_id") or name[8:-5], "created_at": m.get("created_at"),
+                          "days": m.get("days"), "symbols": len(m.get("symbols", [])),
+                          "grid": m.get("grid"), "n_configs": m.get("n_configs"),
+                          "status": rec.get("status"),
+                          "best": (rec.get("best") or {}).get("label")})
+        except Exception:
+            continue
+    items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    running = compare_proc["job_id"] if compare_running() else None
+    return jsonify({"ok": True, "reports": items[:30], "running_job": running})
+
+
+@app.route("/api/compare/apply", methods=["POST"])
+def api_compare_apply():
+    """اعمال یک تنظیم از نتایج مقایسه روی ربات زنده (فقط روی سیگنال‌ها و پوزیشن‌های بعدی اثر داره)."""
+    body = request.get_json(force=True, silent=True) or {}
+    c = body.get("config") or {}
+    active = [s for s in c.get("active_strategies", []) if s in strategies.STRATEGY_REGISTRY]
+    if not active or c.get("combine_mode") not in ("any", "all", "confirm") \
+            or c.get("strictness") not in config.STRICTNESS_PRESETS:
+        return jsonify({"ok": False, "error": "تنظیم نامعتبر"}), 400
+    paper_trader.set_setting(conn, "active_strategies", json.dumps(active))
+    paper_trader.set_setting(conn, "strategy_combine_mode", c["combine_mode"])
+    paper_trader.set_setting(conn, "strictness", c["strictness"])
+    paper_trader.set_setting(conn, "trailing_enabled", "1" if c.get("trailing") else "0")
+    paper_trader.set_setting(conn, "min_sl", "1" if c.get("min_sl") else "0")
+    paper_trader.set_setting(conn, "room_to_target", "1" if c.get("room") else "0")
+    paper_trader.set_setting(conn, "btc_filter", "1" if c.get("btc_filter") else "0")
+    paper_trader.set_setting(conn, "long_only", "1" if c.get("long_only") else "0")
+    log.info(f"[اعمال از مقایسه] تنظیمات جدید ربات زنده: {c}")
+    return jsonify({"ok": True, "settings": get_bot_settings()})
+
+
+@app.route("/api/data_cache")
+def api_data_cache():
+    cache = backtest.get_cache(config)
+    symbols = sorted({k.split("|")[0] for k in cache.index})
+    return jsonify({"ok": True, "size_mb": cache.disk_usage_mb(), "symbols": len(symbols)})
+
 
 
 if __name__ == "__main__":

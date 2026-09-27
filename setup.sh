@@ -31,7 +31,7 @@ WorkingDirectory=${CURRENT_DIR}
 ExecStart=${CURRENT_DIR}/venv/bin/python3 ${CURRENT_DIR}/bot.py
 Restart=always
 RestartSec=10
-MemoryMax=300M
+MemoryMax=900M
 CPUQuota=50%
 
 [Install]
