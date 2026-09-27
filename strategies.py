@@ -14,8 +14,11 @@ config.ACTIVE_STRATEGIES مشخص می‌شه کدوم‌ها فعالن، و co
 فرمت خروجی analysis.generate_signal رو برگردونه (دیکشنری با trend/price/signal)،
 و اون رو به STRATEGY_REGISTRY اضافه کن. بعد اسمش رو به config.ACTIVE_STRATEGIES اضافه کن.
 """
+import numpy as np
 import pandas as pd
+
 import analysis
+import indicators
 
 
 def generate_dow_support_resistance(df, cfg):
@@ -222,6 +225,160 @@ def generate_candle_setup(df, cfg):
     return result
 
 
+# ==================== استراتژی‌های شناخته‌شده‌ی اندیکاتوری ====================
+# همه با همون خروجی استاندارد و همون مرحله‌ی نهایی (analysis.finalize_signal)، یعنی
+# حداقل R:R، حداقل فاصله‌ی SL و بقیه‌ی قواعد مشترک روی این‌ها هم اعمال می‌شه.
+
+def _empty(df, name):
+    return {"trend": "sideways", "price": float(df["close"].iloc[-1]), "support": None,
+            "resistance": None, "atr": None, "signal": None, "strategy": name}
+
+
+def _prep(df, cfg, name, min_len=30):
+    """آرایه‌ها + ATR آخرین کندل؛ اگه دیتا یا ATR نامعتبر بود، None."""
+    if len(df) < min_len:
+        return None, _empty(df, name)
+    atr_series = analysis.compute_atr(df, cfg.ATR_PERIOD)
+    atr = atr_series.iloc[-1]
+    res = _empty(df, name)
+    if pd.isna(atr) or atr <= 0:
+        return None, res
+    res["atr"] = float(atr)
+    a = {k: df[k].values.astype(float) for k in ("open", "high", "low", "close", "volume")}
+    a["atr"] = float(atr)
+    a["atr_series"] = atr_series.values
+    return a, res
+
+
+def _finish(res, long_sig, short_sig, cfg, a):
+    """اول خرید، اگه نهایی نشد فروش (مثل بقیه‌ی استراتژی‌ها)."""
+    if long_sig is not None:
+        sig = analysis.finalize_signal("LONG", float(a["close"][-1]), long_sig, None, a["atr"], cfg, False)
+        if sig:
+            res["trend"], res["signal"] = "uptrend", sig
+            return res
+    if short_sig is not None:
+        sig = analysis.finalize_signal("SHORT", float(a["close"][-1]), short_sig, None, a["atr"], cfg, False)
+        if sig:
+            res["trend"], res["signal"] = "downtrend", sig
+    return res
+
+
+def generate_ema_cross(df, cfg):
+    """کراس EMA سریع/کند در جهت EMA روند. حد ضرر پشت کف/سقف چند کندل اخیر."""
+    a, res = _prep(df, cfg, "ema_cross")
+    if a is None:
+        return res
+    c, h, l = a["close"], a["high"], a["low"]
+    ef = indicators.ema(c, cfg.EMA_CROSS_FAST)
+    es = indicators.ema(c, cfg.EMA_CROSS_SLOW)
+    et = indicators.ema(c, cfg.EMA_CROSS_TREND)
+    buf = a["atr"] * cfg.ATR_SL_BUFFER
+    L = cfg.SWING_STOP_LOOKBACK
+    long_sl = short_sl = None
+    if ef[-1] > es[-1] and ef[-2] <= es[-2] and c[-1] > et[-1]:
+        long_sl = float(indicators.last_min(l, L)[-1]) - buf
+    elif ef[-1] < es[-1] and ef[-2] >= es[-2] and c[-1] < et[-1]:
+        short_sl = float(indicators.last_max(h, L)[-1]) + buf
+    return _finish(res, long_sl, short_sl, cfg, a)
+
+
+def generate_ema_pullback(df, cfg):
+    """در روند (EMA سریع بالای کند)، قیمت به EMA سریع برمی‌گرده و با کندل هم‌جهت ازش جدا می‌شه."""
+    a, res = _prep(df, cfg, "ema_pullback")
+    if a is None:
+        return res
+    o, c, h, l = a["open"], a["close"], a["high"], a["low"]
+    ef = indicators.ema(c, cfg.EMA_PB_FAST)
+    es = indicators.ema(c, cfg.EMA_PB_SLOW)
+    buf = a["atr"] * cfg.ATR_SL_BUFFER
+    L = cfg.SWING_STOP_LOOKBACK
+    long_sl = short_sl = None
+    if ef[-1] > es[-1] and c[-1] > es[-1] and l[-1] <= ef[-1] and c[-1] > ef[-1] and c[-1] > o[-1]:
+        long_sl = float(indicators.last_min(l, L)[-1]) - buf
+    if ef[-1] < es[-1] and c[-1] < es[-1] and h[-1] >= ef[-1] and c[-1] < ef[-1] and c[-1] < o[-1]:
+        short_sl = float(indicators.last_max(h, L)[-1]) + buf
+    return _finish(res, long_sl, short_sl, cfg, a)
+
+
+def generate_bb_reversion(df, cfg):
+    """بازگشت به داخل باند بولینگر بعد از بسته شدن بیرون باند، با RSI اشباع (میانگین‌گرا)."""
+    a, res = _prep(df, cfg, "bb_reversion")
+    if a is None:
+        return res
+    c, h, l = a["close"], a["high"], a["low"]
+    mid, up, lo = indicators.bollinger(c, cfg.BB_PERIOD, cfg.BB_STD)
+    rsi = indicators.rsi_sma(c, cfg.RSI_PERIOD)
+    buf = a["atr"] * cfg.ATR_SL_BUFFER
+    long_sl = short_sl = None
+    if c[-2] < lo[-2] and c[-1] > lo[-1] and rsi[-2] < cfg.BB_RSI_LOW:
+        long_sl = float(min(l[-2], l[-1])) - buf
+    if c[-2] > up[-2] and c[-1] < up[-1] and rsi[-2] > cfg.BB_RSI_HIGH:
+        short_sl = float(max(h[-2], h[-1])) + buf
+    return _finish(res, long_sl, short_sl, cfg, a)
+
+
+def generate_rsi_pullback(df, cfg):
+    """در جهت روند (میانگین ۱۰۰)، RSI از ناحیه‌ی اصلاح برمی‌گرده."""
+    a, res = _prep(df, cfg, "rsi_pullback")
+    if a is None:
+        return res
+    c, h, l = a["close"], a["high"], a["low"]
+    trend = indicators.sma(c, cfg.RSI_PB_TREND_SMA)
+    rsi = indicators.rsi_sma(c, cfg.RSI_PERIOD)
+    buf = a["atr"] * cfg.ATR_SL_BUFFER
+    L = cfg.SWING_STOP_LOOKBACK
+    long_sl = short_sl = None
+    if c[-1] > trend[-1] and rsi[-2] < cfg.RSI_PB_LONG_CROSS <= rsi[-1]:
+        long_sl = float(indicators.last_min(l, L)[-1]) - buf
+    if c[-1] < trend[-1] and rsi[-2] > cfg.RSI_PB_SHORT_CROSS >= rsi[-1]:
+        short_sl = float(indicators.last_max(h, L)[-1]) + buf
+    return _finish(res, long_sl, short_sl, cfg, a)
+
+
+def generate_squeeze_breakout(df, cfg):
+    """فشردگی نوسان (باند بولینگر داخل کانال کلتنر) و بعد شکست با حجم — شروع حرکت‌های بزرگ."""
+    a, res = _prep(df, cfg, "squeeze_breakout")
+    if a is None:
+        return res
+    c, v = a["close"], a["volume"]
+    mid, up, lo = indicators.bollinger(c, cfg.BB_PERIOD, cfg.BB_STD)
+    atr_s = a["atr_series"]
+    kc_up = mid + cfg.SQUEEZE_KC_MULT * atr_s
+    kc_lo = mid - cfg.SQUEEZE_KC_MULT * atr_s
+    with np.errstate(invalid="ignore"):
+        sq = (up < kc_up) & (lo > kc_lo)
+    n_sq = int(sq[-1 - cfg.SQUEEZE_LOOKBACK:-1].sum())
+    avg_v = indicators.prev_mean(v, 20)[-1]
+    vol_ok = v[-1] > avg_v * cfg.SQUEEZE_VOLUME_MULT
+    buf = a["atr"] * cfg.ATR_SL_BUFFER
+    long_sl = short_sl = None
+    if n_sq >= cfg.SQUEEZE_MIN_BARS and vol_ok:
+        if c[-1] > up[-1]:
+            long_sl = float(mid[-1]) - buf
+        elif c[-1] < lo[-1]:
+            short_sl = float(mid[-1]) + buf
+    return _finish(res, long_sl, short_sl, cfg, a)
+
+
+def generate_donchian_trend(df, cfg):
+    """شکست کانال دانچیان در جهت روند، حد ضرر ۲×ATR (سبک معامله‌گران لاک‌پشت)."""
+    a, res = _prep(df, cfg, "donchian_trend")
+    if a is None:
+        return res
+    c, h, l = a["close"], a["high"], a["low"]
+    hh = indicators.prev_max(h, cfg.DONCHIAN_PERIOD)
+    ll = indicators.prev_min(l, cfg.DONCHIAN_PERIOD)
+    trend = indicators.sma(c, cfg.DONCHIAN_TREND_SMA)
+    dist = a["atr"] * cfg.DONCHIAN_ATR_STOP
+    long_sl = short_sl = None
+    if c[-1] > hh[-1] and c[-1] > trend[-1]:
+        long_sl = float(c[-1]) - dist
+    elif c[-1] < ll[-1] and c[-1] < trend[-1]:
+        short_sl = float(c[-1]) + dist
+    return _finish(res, long_sl, short_sl, cfg, a)
+
+
 STRATEGY_REGISTRY = {
     "dow_support_resistance": {
         "fn": generate_dow_support_resistance,
@@ -239,6 +396,12 @@ STRATEGY_REGISTRY = {
         "fn": generate_candle_setup,
         "label": "کندل ستاپ (TST/BOF پرایس‌اکشن)",
     },
+    "ema_cross": {"fn": generate_ema_cross, "label": "کراس EMA با فیلتر روند"},
+    "ema_pullback": {"fn": generate_ema_pullback, "label": "پولبک به EMA در روند"},
+    "bb_reversion": {"fn": generate_bb_reversion, "label": "بازگشت از باند بولینگر + RSI"},
+    "rsi_pullback": {"fn": generate_rsi_pullback, "label": "پولبک RSI در جهت روند"},
+    "squeeze_breakout": {"fn": generate_squeeze_breakout, "label": "شکست بعد از فشردگی (Squeeze)"},
+    "donchian_trend": {"fn": generate_donchian_trend, "label": "شکست کانال دانچیان (لاک‌پشت)"},
 }
 
 

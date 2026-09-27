@@ -51,6 +51,17 @@ def _resample(series_arr, src_tf, dst_tf):
     return np.array(rows, dtype=np.float64)
 
 
+def profile_cfg(base_cfg, timeframe):
+    """یک نسخه از تنظیمات با پروفایل یک تایم‌فریم (۱ دقیقه تا ۴ ساعته) اعمال‌شده."""
+    import backtest
+    prof = base_cfg.TIMEFRAME_PROFILES[timeframe]
+    over = {"TIMEFRAME": timeframe, "HTF_TIMEFRAMES": list(prof["HTF_TIMEFRAMES"]),
+            "COOLDOWN_HOURS": prof["COOLDOWN_HOURS"], "MAX_HOLD_MINUTES": prof["MAX_HOLD_MINUTES"],
+            "LIMIT_WAIT_BARS": prof["LIMIT_WAIT_BARS"],
+            "BTC_REGIME_TIMEFRAME": getattr(base_cfg, "PROFILE_BTC_TIMEFRAME", {}).get(timeframe, "4h")}
+    return backtest.build_config(base_cfg, over)
+
+
 def plan_jobs(symbols, days, cfg, now_ms=None):
     now_ms = now_ms or int(time.time() * 1000)
     start_ms = now_ms - int(days) * DAY_MS

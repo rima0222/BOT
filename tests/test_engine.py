@@ -209,20 +209,21 @@ def test_path_equivalence():
         dist = entry * rng.uniform(0.002, 0.03)
         sl = entry - dist if side == 1 else entry + dist
         tp = entry + dist * 2.5 if side == 1 else entry - dist * 2.5
-        for trailing in (False, True):
-            r = sim._run(t0, side, entry, sl, tp, trailing)
+        for trailing, hold in ((False, 0), (True, 0), (False, 7), (True, 12)):
+            r = sim._run(t0, side, entry, sl, tp, trailing, hold)
             # مرجع: حلقه‌ی step_bar
             side_s = "LONG" if side == 1 else "SHORT"
             cur_sl, peak = sl, entry
             ref = None
-            for k in range(t0 + 1, s.n):
+            last_k = min(s.n, t0 + 1 + hold) if hold else s.n
+            for k in range(t0 + 1, last_k):
                 hit, price, kind, level, cur_sl, peak = paper_trader.step_bar(
                     side_s, entry, sl, cur_sl, tp, peak, trailing, s.o[k], s.h[k], s.l[k], s.c[k], ladder, beyond)
                 if hit:
                     ref = (k, price, kind, level)
                     break
             if ref is None:
-                ref = (s.n - 1, s.c[-1], "END", None)
+                ref = (last_k - 1, s.c[last_k - 1], "TIME" if last_k < s.n else "END", None)
             n_checked += 1
             same = (r[0] == ref[0] and close_enough(r[1], ref[1], 1e-12) and r[2] == ref[2]
                     and ((r[3] is None and ref[3] is None) or (r[3] is not None and ref[3] is not None
@@ -250,6 +251,8 @@ def test_no_lookahead_and_portfolio():
     cfg = make_cfg(ACTIVE_STRATEGIES=["dow_support_resistance", "volume_spike", "candle_setup"],
                    STRATEGY_COMBINE_MODE="any", HTF_TIMEFRAMES=["1h", "4h"], HTF_MIN_AGREEMENT=1,
                    SHORT_EXTRA_HTF_AGREEMENT=0, USE_TRAILING_SL=True, MAX_OPEN_POSITIONS=3)
+    check(sim_engine.htf_required(4, 5, 1) == (4, 5) and sim_engine.htf_required(4, 3, 1) == (3, 3),
+          "تبدیل سخت‌گیری HTF به تعداد تایم‌فریم اشتباهه")
     start_ms = int(arrs["S0/USDT"][400, 0])
     full = _build_preps(arrs, cfg, start_ms)
     res_full, _ = fast_backtest.run_single(full, list(arrs), cfg)
@@ -260,8 +263,11 @@ def test_no_lookahead_and_portfolio():
     def key(t):
         return (t["symbol"], t["open_time"], t["side"], round(t["entry"], 10), round(t["pnl"], 8), t["close_time"])
 
-    closed_before = [key(t) for t in res_full["trades"] if t["close_time"] < cut_ms]
-    part_before = [key(t) for t in res_part["trades"] if t["close_time"] < cut_ms and t["exit_type"] != "END"]
+    # معاملاتی که سیگنالشون نزدیک نقطه‌ی برش بوده (سفارش لیمیت هنوز منتظر پر شدن) کنار گذاشته می‌شن
+    margin_ms = 900_000 * (cfg.LIMIT_WAIT_BARS + 1)
+    closed_before = [key(t) for t in res_full["trades"] if t["close_time"] < cut_ms - margin_ms]
+    part_before = [key(t) for t in res_part["trades"] if t["close_time"] < cut_ms - margin_ms
+                   and t["exit_type"] != "END"]
     check(len(res_full["trades"]) > 20, f"تعداد معامله‌ی تست خیلی کمه ({len(res_full['trades'])})")
     check(closed_before == part_before,
           f"نگاه به آینده! {len(closed_before)} در برابر {len(part_before)} معامله قبل از برش")
@@ -282,6 +288,14 @@ def test_no_lookahead_and_portfolio():
     check(max_open <= cfg.MAX_OPEN_POSITIONS, f"سقف پوزیشن رعایت نشده ({max_open})")
     check(ok_sym, "دو پوزیشن هم‌زمان روی یک نماد!")
     print(f"  ✓ {len(res_full['trades'])} معامله، حداکثر {max_open} پوزیشن هم‌زمان")
+    # حالت ورود بازار و حد زمانی هم اجرا بشن و معامله‌ی معتبر بدن
+    cfg2 = make_cfg(ACTIVE_STRATEGIES=["ema_pullback", "bb_reversion", "donchian_trend"], STRATEGY_COMBINE_MODE="any",
+                    HTF_TIMEFRAMES=["1h", "4h"], HTF_MIN_AGREEMENT=1, ENTRY_MODE="market", MAX_HOLD_MINUTES=180)
+    res_m, _ = fast_backtest.run_single(_build_preps(arrs, cfg2, start_ms), list(arrs), cfg2)
+    types = {t["exit_type"] for t in res_m["trades"]}
+    check(len(res_m["trades"]) > 20 and "TIME" in types, f"ورود بازار/حد زمانی کار نکرد: {len(res_m['trades'])} {types}")
+    check(all(t["bars"] <= 12 + 1 for t in res_m["trades"] if t["exit_type"] != "END"), "حد زمانی رعایت نشده")
+    print(f"  ✓ ورود بازار + حد زمانی: {len(res_m['trades'])} معامله، انواع خروج: {sorted(types)}")
 
 
 def test_speed():

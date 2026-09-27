@@ -20,7 +20,12 @@
   جانبی از ذخیره‌ی تنظیمات دیگه (مثل درصد ریسک) اجرا نمی‌شه.
 """
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+
+def utc_ms(dt):
+    """datetime بدون منطقه‌ی زمانی (که همیشه UTC ذخیره می‌شه) → میلی‌ثانیه؛ مستقل از ساعت سرور."""
+    return int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
 
 
 def _now(as_of=None):
@@ -74,6 +79,8 @@ def get_conn(db_path):
         ("leverage", "REAL"), ("liquidation_price", "REAL"),
         ("initial_sl", "REAL"), ("peak_price", "REAL"), ("trailing_enabled", "INTEGER DEFAULT 0"),
         ("strategy_name", "TEXT"), ("exit_type", "TEXT"), ("last_bar_ts", "INTEGER"),
+        ("entry_taker", "INTEGER DEFAULT 0"), ("expire_ts", "INTEGER"), ("max_hold_min", "REAL DEFAULT 0"),
+        ("fill_ts", "INTEGER"), ("timeframe", "TEXT"),
     )
     for col, coltype in new_cols:
         if col not in existing_cols:
@@ -110,7 +117,7 @@ def record_equity(conn, balance, as_of=None):
 
 def get_locked_capital(conn):
     """مجموع *مارجین* (نه کل ارزش پوزیشن) که الان توی پوزیشن‌های باز قفل شده."""
-    row = conn.execute("SELECT COALESCE(SUM(margin), 0) FROM trades WHERE status='OPEN'").fetchone()
+    row = conn.execute("SELECT COALESCE(SUM(margin), 0) FROM trades WHERE status IN ('OPEN','PENDING')").fetchone()
     return row[0] or 0.0
 
 
@@ -132,12 +139,12 @@ def reset_capital(conn, amount, as_of=None):
 # ==================== وضعیت پوزیشن‌ها ====================
 
 def get_open_symbols(conn):
-    rows = conn.execute("SELECT DISTINCT symbol FROM trades WHERE status='OPEN'").fetchall()
+    rows = conn.execute("SELECT DISTINCT symbol FROM trades WHERE status IN ('OPEN','PENDING')").fetchall()
     return [r[0] for r in rows]
 
 
 def get_open_position_count(conn):
-    row = conn.execute("SELECT COUNT(*) FROM trades WHERE status='OPEN'").fetchone()
+    row = conn.execute("SELECT COUNT(*) FROM trades WHERE status IN ('OPEN','PENDING')").fetchone()
     return row[0] or 0
 
 
@@ -160,7 +167,7 @@ def is_in_cooldown(conn, symbol, cooldown_hours, as_of=None):
 
 def has_open_trade(conn, symbol):
     return conn.execute(
-        "SELECT id FROM trades WHERE symbol=? AND status='OPEN'", (symbol,)
+        "SELECT id FROM trades WHERE symbol=? AND status IN ('OPEN','PENDING')", (symbol,)
     ).fetchone() is not None
 
 
@@ -230,9 +237,12 @@ def compute_position_size(side, entry, sl, risk_pct, balance, locked_margin, ope
 def open_trade(conn, symbol, side, entry, sl, tp, risk_pct, start_balance,
                 min_notional=5.0, max_open_positions=None,
                 max_leverage=5, leverage_safety_mult=1.6, position_pct_cap=20.0,
-                trailing_enabled=False, strategy_name=None, as_of=None):
+                trailing_enabled=False, strategy_name=None, as_of=None,
+                pending=False, expire_ts=None, entry_taker=False, max_hold_min=0, timeframe=None):
     """
     باز کردن پوزیشن مجازی با لوریج و مدیریت سرمایه‌ی واقعی.
+    pending=True: سفارش لیمیت ورود ثبت می‌شه (وضعیت PENDING، مارجین و جای پوزیشن رزرو)؛
+    فقط اگه قیمت تا expire_ts از قیمت ورود رد بشه پر می‌شه، وگرنه لغو (CANCELLED).
     خروجی: dict شامل opened (True/False) و در صورت باز شدن، جزئیات کامل پوزیشن.
     """
     balance = get_balance(conn, start_balance, as_of=as_of)
@@ -246,14 +256,17 @@ def open_trade(conn, symbol, side, entry, sl, tp, risk_pct, start_balance,
     size, notional, margin = pos["size"], pos["notional"], pos["margin"]
     leverage, liquidation_price, capped = pos["leverage"], pos["liquidation_price"], pos["capped"]
 
+    now_ms = utc_ms(_now(as_of))
     conn.execute("""
         INSERT INTO trades (symbol, side, entry, sl, tp, initial_sl, peak_price,
                              size, notional, margin, leverage, liquidation_price,
-                             trailing_enabled, strategy_name, status, open_time)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'OPEN', ?)
+                             trailing_enabled, strategy_name, status, open_time,
+                             entry_taker, expire_ts, max_hold_min, fill_ts, timeframe)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (symbol, side, entry, sl, tp, sl, entry,
           size, notional, margin, leverage, liquidation_price,
-          1 if trailing_enabled else 0, strategy_name, _now(as_of).isoformat()))
+          1 if trailing_enabled else 0, strategy_name, "PENDING" if pending else "OPEN", _now(as_of).isoformat(),
+          1 if entry_taker else 0, expire_ts, float(max_hold_min or 0), None if pending else now_ms, timeframe))
     conn.commit()
 
     return {
@@ -356,8 +369,8 @@ def classify_exit_level(kind, level, initial_sl, entry, trailing_enabled):
     """نوع خروج بر اساس «سطحی که فعال شد» (نه قیمت پرشده، که با گپ ممکنه فرق کنه)."""
     if kind == "TP":
         return "TP"
-    if kind == "END":
-        return "END"
+    if kind in ("END", "TIME"):
+        return kind
     if not trailing_enabled:
         return "SL"
     if level == initial_sl:
@@ -368,52 +381,89 @@ def classify_exit_level(kind, level, initial_sl, entry, trailing_enabled):
 
 
 def process_bars(conn, symbol, bars, start_balance, ladder, beyond_distance_r,
-                 maker_fee_pct=0.0, taker_fee_pct=0.0, taker_slippage_pct=0.0):
+                 maker_fee_pct=0.0, taker_fee_pct=0.0, taker_slippage_pct=0.0, funding_pct_8h=0.0,
+                 now_ms=None):
     """
-    ربات زنده: کندل‌های ۱ دقیقه‌ایِ بسته‌شده‌ی جدید رو روی پوزیشن‌های باز این نماد اعمال
-    می‌کنه (همون step_bar بک‌تست). bars: لیست (open_ms, o, h, l, c) مرتب.
-    آخرین کندل پردازش‌شده‌ی هر پوزیشن توی دیتابیس ذخیره می‌شه، پس اگه ربات مدتی
-    خاموش بوده، بعد از روشن شدن هیچ برخورد به SL/TP ای جا نمی‌افته.
+    ربات زنده: کندل‌های ۱ دقیقه‌ایِ بسته‌شده‌ی جدید رو روی سفارش‌ها/پوزیشن‌های این نماد
+    اعمال می‌کنه — دقیقاً با همون قواعد موتور بک‌تست:
+      - سفارش لیمیت در انتظار (PENDING): اگه قیمت از قیمت ورود رد بشه پر می‌شه (و همون
+        کندل هم محافظه‌کارانه روی پوزیشن اعمال می‌شه)؛ اگه تا زمان انقضا پر نشد، لغو.
+      - پوزیشن باز: step_bar (SL/TP/تریلینگ با سایه‌ی کندل) + حد زمانی (اگه تعیین شده).
+    bars: لیست (open_ms, o, h, l, c) مرتب. آخرین کندل پردازش‌شده ذخیره می‌شه، پس بعد از
+    خاموش/روشن شدن ربات هم هیچ کندلی جا نمی‌افته.
     """
+    now_ms = now_ms if now_ms is not None else utc_ms(datetime.utcnow())
     rows = conn.execute(
-        "SELECT id, side, entry, sl, tp, initial_sl, peak_price, size, trailing_enabled, open_time, last_bar_ts "
-        "FROM trades WHERE symbol=? AND status='OPEN'", (symbol,)
+        "SELECT id, side, entry, sl, tp, initial_sl, peak_price, size, trailing_enabled, open_time, last_bar_ts, "
+        "status, expire_ts, max_hold_min, fill_ts, entry_taker, notional "
+        "FROM trades WHERE symbol=? AND status IN ('OPEN','PENDING')", (symbol,)
     ).fetchall()
-    if not rows or not bars:
+    if not rows:
         return
-    for (trade_id, side, entry, sl, tp, initial_sl, peak, size, trailing, open_time, last_bar_ts) in rows:
+    for (trade_id, side, entry, sl, tp, initial_sl, peak, size, trailing, open_time, last_bar_ts,
+         status, expire_ts, max_hold_min, fill_ts, entry_taker, notional) in rows:
         trailing = bool(trailing)
         peak = peak if peak is not None else entry
         initial_sl = initial_sl if initial_sl is not None else sl
-        open_ms = int(datetime.fromisoformat(open_time).timestamp() * 1000) if open_time else 0
-        # کندلی که قبل از لحظه‌ی باز شدن پوزیشن شروع شده رو حساب نکن (فقط ثانیه‌های بعدش مهمه)
+        open_ms = utc_ms(datetime.fromisoformat(open_time)) if open_time else 0
+        # کندلی که قبل از لحظه‌ی ثبت سفارش شروع شده حساب نمی‌شه
         min_start = max(open_ms - (open_ms % 60_000), (last_bar_ts or -1) + 1)
         closed = False
         for (bar_open_ms, o, h, l, c) in bars:
             if bar_open_ms < min_start:
                 continue
+            bar_close_ms = bar_open_ms + 60_000
+            if status == "PENDING":
+                if expire_ts and bar_open_ms >= expire_ts:
+                    break
+                filled = (l < entry) if side == "LONG" else (h > entry)
+                last_bar_ts = bar_open_ms
+                if not filled:
+                    continue
+                status, fill_ts = "OPEN", bar_open_ms
+                conn.execute("UPDATE trades SET status='OPEN', fill_ts=? WHERE id=?", (fill_ts, trade_id))
             hit, price, kind, level, sl, peak = step_bar(side, entry, initial_sl, sl, tp, peak, trailing,
                                                          o, h, l, c, ladder, beyond_distance_r)
             last_bar_ts = bar_open_ms
+            if not hit and max_hold_min and fill_ts and bar_close_ms >= fill_ts + max_hold_min * 60_000:
+                hit, price, kind, level = True, c, "TIME", None
             if hit:
                 exit_type = classify_exit_level(kind, level, initial_sl, entry, trailing)
                 _close_trade_row(conn, trade_id, side, entry, size, price, exit_type, start_balance,
                                  maker_fee_pct, taker_fee_pct, taker_slippage_pct,
-                                 as_of=datetime.utcfromtimestamp((bar_open_ms + 60_000) / 1000))
+                                 as_of=datetime.utcfromtimestamp(bar_close_ms / 1000),
+                                 entry_taker=bool(entry_taker), notional=notional, fill_ts=fill_ts,
+                                 funding_pct_8h=funding_pct_8h)
                 closed = True
                 break
-        if not closed:
-            conn.execute("UPDATE trades SET sl=?, peak_price=?, last_bar_ts=? WHERE id=?",
-                         (sl, peak, last_bar_ts, trade_id))
+        if closed:
+            continue
+        if status == "PENDING" and expire_ts and now_ms >= expire_ts:
+            cancel_pending(conn, trade_id)
+            continue
+        conn.execute("UPDATE trades SET sl=?, peak_price=?, last_bar_ts=? WHERE id=?",
+                     (sl, peak, last_bar_ts, trade_id))
+    conn.commit()
+
+
+def cancel_pending(conn, trade_id, reason="CANCELLED"):
+    """لغو سفارش ورودی که پر نشده — مارجین آزاد می‌شه، سود/زیانی نداره، کول‌داون هم نمی‌خوره."""
+    conn.execute("UPDATE trades SET status='CANCELLED', close_time=?, pnl=0, fee_cost=0, exit_type=? "
+                 "WHERE id=? AND status='PENDING'", (_now().isoformat(), reason, trade_id))
     conn.commit()
 
 
 def _close_trade_row(conn, trade_id, side, entry, size, close_price, exit_type, start_balance,
-                     maker_fee_pct, taker_fee_pct, taker_slippage_pct, as_of=None):
+                     maker_fee_pct, taker_fee_pct, taker_slippage_pct, as_of=None,
+                     entry_taker=False, notional=None, fill_ts=None, funding_pct_8h=0.0):
     balance = get_balance(conn, start_balance, as_of=as_of)
     pnl_gross = (close_price - entry) * size if side == "LONG" else (entry - close_price) * size
     fee_cost, _, _, _ = _fee_for_exit(entry, close_price, size, exit_type,
-                                       maker_fee_pct, taker_fee_pct, taker_slippage_pct)
+                                       maker_fee_pct, taker_fee_pct, taker_slippage_pct, entry_taker=entry_taker)
+    if funding_pct_8h and fill_ts:
+        close_ms = utc_ms(_now(as_of))
+        fee_cost += funding_cost(notional if notional is not None else entry * size, fill_ts, close_ms,
+                                 funding_pct_8h)
     pnl_net = pnl_gross - fee_cost
     balance += pnl_net
     result = "WIN" if pnl_net >= 0 else "LOSS"
@@ -429,12 +479,22 @@ def _close_trade_row(conn, trade_id, side, entry, size, close_price, exit_type, 
 
 # ==================== بستن پوزیشن (خودکار یا دستی) ====================
 
-def _fee_for_exit(entry, close_price, size, exit_type, maker_fee_pct, taker_fee_pct, taker_slippage_pct):
+def funding_cost(notional, from_ms, to_ms, pct_per_8h):
+    """هزینه‌ی فاندینگ فیوچرز برای مدت نگه‌داری (محافظه‌کارانه همیشه پرداختی)."""
+    if not pct_per_8h or to_ms <= from_ms:
+        return 0.0
+    hours = (to_ms - from_ms) / 3_600_000
+    return notional * (pct_per_8h / 100) * hours / 8
+
+
+def _fee_for_exit(entry, close_price, size, exit_type, maker_fee_pct, taker_fee_pct, taker_slippage_pct,
+                  entry_taker=False):
     """
-    کارمزد واقعی: ورود همیشه میکر فرض می‌شه. خروج با TP هم میکر (سفارش لیمیتی
-    منتظرمونده)؛ خروج با SL/تریلینگ همیشه تیکر (سفارش استاپ فوری) + کمی اسلیپیج.
+    کارمزد واقعی: ورود با سفارش لیمیت میکره (با سفارش بازار تیکر؛ اسلیپیج ورود بازار
+    از قبل توی قیمت ورود اعمال شده). خروج با TP میکر (سفارش لیمیتی منتظرمونده)؛ خروج با
+    SL/تریلینگ/حد زمانی همیشه تیکر (سفارش فوری) + کمی اسلیپیج.
     """
-    entry_fee = entry * size * (maker_fee_pct / 100)
+    entry_fee = entry * size * ((taker_fee_pct if entry_taker else maker_fee_pct) / 100)
     if exit_type == "TP":
         exit_fee = close_price * size * (maker_fee_pct / 100)
         slippage_cost = 0.0
@@ -501,17 +561,23 @@ def check_and_close_trades(conn, symbol, current_price, start_balance,
 def close_trade_manually(conn, trade_id, current_price, start_balance,
                           maker_fee_pct=0.0, taker_fee_pct=0.0, taker_slippage_pct=0.0, as_of=None):
     """بستن دستی یک پوزیشن از پنل — چون تصمیم دستیه، مثل یک سفارش بازار (تیکر) حساب می‌شه."""
+    pend = conn.execute("SELECT symbol FROM trades WHERE id=? AND status='PENDING'", (trade_id,)).fetchone()
+    if pend:
+        cancel_pending(conn, trade_id, "MANUAL_CANCEL")
+        return {"ok": True, "symbol": pend[0], "pnl": 0.0, "cancelled": True}
     row = conn.execute(
-        "SELECT symbol, side, entry, size, initial_sl, tp FROM trades WHERE id=? AND status='OPEN'", (trade_id,)
+        "SELECT symbol, side, entry, size, initial_sl, tp, entry_taker FROM trades WHERE id=? AND status='OPEN'",
+        (trade_id,)
     ).fetchone()
     if not row:
         return {"ok": False, "error": "پوزیشن باز با این شناسه پیدا نشد"}
-    symbol, side, entry, size, initial_sl, tp = row
+    symbol, side, entry, size, initial_sl, tp, entry_taker = row
     balance = get_balance(conn, start_balance, as_of=as_of)
 
     pnl_gross = (current_price - entry) * size if side == "LONG" else (entry - current_price) * size
     fee_cost, _, _, _ = _fee_for_exit(entry, current_price, size, "MANUAL",
-                                       maker_fee_pct, taker_fee_pct, taker_slippage_pct)
+                                       maker_fee_pct, taker_fee_pct, taker_slippage_pct,
+                                       entry_taker=bool(entry_taker))
     pnl_net = pnl_gross - fee_cost
     balance += pnl_net
     result = "WIN" if pnl_net >= 0 else "LOSS"
@@ -597,8 +663,9 @@ def get_stats(conn):
 
 def get_open_trades(conn):
     cols = ["id", "symbol", "side", "entry", "sl", "tp", "initial_sl", "peak_price", "size", "notional",
-            "margin", "leverage", "liquidation_price", "trailing_enabled", "strategy_name", "open_time"]
-    rows = conn.execute(f"SELECT {','.join(cols)} FROM trades WHERE status='OPEN' ORDER BY id DESC").fetchall()
+            "margin", "leverage", "liquidation_price", "trailing_enabled", "strategy_name", "open_time",
+            "status", "timeframe", "expire_ts", "max_hold_min", "fill_ts"]
+    rows = conn.execute(f"SELECT {','.join(cols)} FROM trades WHERE status IN ('OPEN','PENDING') ORDER BY id DESC").fetchall()
     return [dict(zip(cols, r)) for r in rows]
 
 

@@ -5,7 +5,7 @@
 #   bash manage.sh restart   -> ری‌استارت
 #   bash manage.sh status    -> وضعیت فعلی
 #   bash manage.sh logs      -> دیدن لاگ زنده
-#   bash manage.sh compare [روز] [تعداد نماد] [quick|full]
+#   bash manage.sh compare [روز] [تعداد نماد] [quick|full] [تایم‌فریم‌ها مثلاً 1m,5m یا 15m,1h,4h]
 #                            -> مقایسه‌ی خودکار استراتژی‌ها از ترمینال (مثلاً: bash manage.sh compare 730 20 quick)
 #   bash manage.sh test      -> تست دقت موتور بک‌تست (بدون اینترنت)
 
@@ -30,9 +30,9 @@ case "$1" in
     ;;
   compare)
     cd "$(dirname "$0")"
-    DAYS=${2:-730}; TOP=${3:-20}; GRID=${4:-quick}
-    echo "🏆 مقایسه‌ی استراتژی‌ها: ${DAYS} روز، ${TOP} نماد، دامنه‌ی ${GRID} (نتیجه توی پنل هم نمایش داده می‌شه)"
-    nice -n 10 ./venv/bin/python3 compare.py --days "$DAYS" --top "$TOP" --grid "$GRID"
+    DAYS=${2:-730}; TOP=${3:-20}; GRID=${4:-quick}; TFS=${5:-15m,1h,4h}
+    echo "🏆 مقایسه‌ی استراتژی‌ها: ${DAYS} روز، ${TOP} نماد، دامنه‌ی ${GRID}، تایم‌فریم‌ها ${TFS} (نتیجه توی پنل هم نمایش داده می‌شه)"
+    nice -n 10 ./venv/bin/python3 compare.py --days "$DAYS" --top "$TOP" --grid "$GRID" --timeframes "$TFS"
     ;;
   test)
     cd "$(dirname "$0")"

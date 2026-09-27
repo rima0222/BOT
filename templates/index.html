@@ -227,6 +227,16 @@
         <label style="margin-right:14px;">سطح سخت‌گیری:</label>
         <select id="strictnessSelect" style="width:210px;"></select>
         <button id="saveRiskBtn" class="btn btn-save">ذخیره</button>
+      </div>
+      <div class="controls-row">
+        <label>تایم‌فریم / سبک معامله:</label>
+        <select id="timeframeSelect" style="width:230px;"></select>
+        <label style="margin-right:14px;">نحوه‌ی ورود:</label>
+        <select id="entryModeSelect" style="width:280px;">
+          <option value="limit">سفارش لیمیت (میکر، کارمزد کمتر؛ فقط اگه پر بشه)</option>
+          <option value="market">سفارش بازار (فوری، تیکر + اسلیپیج)</option>
+        </select>
+        <span class="hint" id="profileHint"></span>
         <span id="saveMsg" style="font-size:12px;"></span>
       </div>
       <div class="controls-row" style="margin-top:4px;">
@@ -377,10 +387,14 @@
           <option value="30">۳۰</option>
           <option value="40">۴۰</option>
         </select>
+        <label>تایم‌فریم‌ها:</label>
+        <span id="cmpTfChecks" class="opt-grid" style="display:inline-flex;"></span>
+      </div>
+      <div class="controls-row">
         <label>دامنه:</label>
         <select id="cmpGrid" style="width:260px;">
-          <option value="quick" selected>سریع — حدود ۷۰۰ تنظیم (چند دقیقه)</option>
-          <option value="full">کامل — حدود ۳۲۰۰ تنظیم (۵-۱۵ دقیقه)</option>
+          <option value="quick" selected>سریع — حدود ۴۰۰ تنظیم برای هر تایم‌فریم</option>
+          <option value="full">کامل — حدود ۲۵۰۰ تنظیم برای هر تایم‌فریم (خیلی طولانی‌تر)</option>
         </select>
         <button id="cmpStartBtn" class="btn btn-save">▶ شروع مقایسه</button>
         <span id="cmpMsg" style="font-size:12px;"></span>
@@ -393,11 +407,17 @@
       <div class="controls-row">
         <label>گزارش‌های قبلی:</label>
         <select id="cmpReports" style="width:420px;"><option value="">—</option></select>
+        <button id="cmpDownloadBtn" class="btn btn-save" style="display:none;">⬇ دانلود فایل کامل گزارش</button>
         <span class="hint" id="cmpCacheInfo"></span>
       </div>
 
       <div id="cmpResults" style="display:none; margin-top:12px;">
         <div id="cmpRec"></div>
+
+        <div class="panel" style="background:#0a0e14;">
+          <div class="panel-head"><h2>کدوم تایم‌فریم؟</h2><span class="hint">اسکلپ در برابر نوسان‌گیری، با همون روش و همون هزینه‌ها</span></div>
+          <div class="scrollbox" style="max-height:none;"><table class="mini" id="cmpTimeframes"></table></div>
+        </div>
 
         <div class="panel" style="background:#0a0e14;">
           <div class="panel-head"><h2>مقایسه با تنظیمات خودت</h2><span class="hint">همون بازه و همون نمادها</span></div>
@@ -430,11 +450,17 @@
       </div>
 
       <div class="controls-row">
+        <label>تایم‌فریم:</label>
+        <select id="btTimeframe" style="width:170px;"></select>
+        <label>ورود:</label>
+        <select id="btEntryMode" style="width:110px;"><option value="limit">لیمیت</option><option value="market">بازار</option></select>
         <label>بازه:</label>
         <select id="btDays">
           <option value="180">۶ ماه</option>
           <option value="365" selected>۱ سال</option>
           <option value="730">۲ سال</option>
+          <option value="30">۱ ماه</option>
+          <option value="60">۲ ماه (سقف اسکلپ ۱ دقیقه)</option>
         </select>
         <label>تعداد نماد:</label>
         <input type="number" id="btTopN" value="15" min="1" max="60" style="width:80px;">
@@ -454,6 +480,7 @@
         <select id="btCombine" style="width:150px;">
           <option value="any">any</option><option value="confirm">confirm</option><option value="all">all</option>
         </select>
+        <button id="btDownloadBtn" class="btn btn-save" style="display:none;">⬇ دانلود فایل کامل این بک‌تست</button>
       </div>
       <div class="controls-row">
         <label>استراتژی‌ها:</label>
@@ -606,7 +633,8 @@ function exitTypeBadge(et){
   const map = {
     TP: ['برخورد به TP', 'tp'], SL: ['برخورد به SL اولیه', 'sl'],
     TRAIL_SL: ['تریلینگ', 'trail'], BREAKEVEN: ['سربه‌سر', 'breakeven'], MANUAL: ['دستی', 'manual'],
-    END: ['پایان دیتا (باز مونده)', 'manual'],
+    END: ['پایان دیتا (باز مونده)', 'manual'], TIME: ['حد زمانی', 'breakeven'],
+    CANCELLED: ['لغو (پر نشد)', 'manual'], MANUAL_CANCEL: ['لغو دستی', 'manual'],
   };
   const [label, cls] = map[et] || [et || '—', 'manual'];
   return `<span class="badge ${cls}">${label}</span>`;
@@ -655,6 +683,18 @@ Object.entries(OPT_KEYS).forEach(([id, key]) => {
     refresh();
   });
 });
+
+async function postControl(body){
+  const res = await fetch('/api/control', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  const data = await res.json();
+  if(!data.ok) alert('خطا: ' + (data.error||''));
+  refresh();
+}
+document.getElementById('timeframeSelect').addEventListener('change', (e) => {
+  if(!confirm('تایم‌فریم ربات عوض بشه؟ پوزیشن‌های باز فعلی مثل قبل مدیریت می‌شن؛ فقط سیگنال‌های جدید با تایم‌فریم جدید ساخته می‌شن.')){ refresh(); return; }
+  postControl({timeframe: e.target.value});
+});
+document.getElementById('entryModeSelect').addEventListener('change', (e) => postControl({entry_mode: e.target.value}));
 
 document.getElementById('combineModeSelect').addEventListener('change', async (e) => {
   await fetch('/api/control', {
@@ -794,7 +834,7 @@ async function refresh(){
     document.getElementById('excludedTokens').innerText =
       [...data.excluded_gold_tokens, ...data.excluded_stablecoin_bases].join('، ');
     document.getElementById('htfTags').innerHTML = data.htf_enabled
-      ? data.htf_timeframes.map(tf => `<span class="htf-tag">${tf}</span>`).join('') : '';
+      ? data.timeframe_profiles[data.timeframe].htf.map(tf => `<span class="htf-tag">${tf}</span>`).join('') : '';
 
     if(!strictnessInitialized){
       const sel = document.getElementById('strictnessSelect');
@@ -809,6 +849,16 @@ async function refresh(){
     ).join(' | ') + ` | بعد از آخرین پله: فاصله‌ی ثابت ${data.trailing_beyond_r}R پشت بیشینه`;
 
     document.getElementById('combineModeSelect').value = data.combine_mode;
+    const tfSel = document.getElementById('timeframeSelect');
+    if(!tfSel.options.length){
+      tfSel.innerHTML = Object.entries(data.timeframe_profiles).map(([k,p]) => `<option value="${k}">${p.label}</option>`).join('');
+    }
+    if(document.activeElement.id !== 'timeframeSelect') tfSel.value = data.timeframe;
+    if(document.activeElement.id !== 'entryModeSelect') document.getElementById('entryModeSelect').value = data.entry_mode;
+    const prof = data.timeframe_profiles[data.timeframe];
+    document.getElementById('profileHint').innerText =
+      `تایید: ${prof.htf.join('، ')} · ${prof.symbols} نماد پرحجم` + (prof.max_hold_min ? ` · حد زمانی ${prof.max_hold_min} دقیقه` : '') +
+      ` · فاندینگ ${data.funding_pct_8h}% هر ۸ ساعت`;
     Object.entries(OPT_KEYS).forEach(([id, key]) => {
       if(document.activeElement.id !== id) document.getElementById(id).checked = !!data[key];
     });
@@ -845,7 +895,8 @@ async function refresh(){
     document.getElementById('openEmpty').style.display = data.open_trades.length ? 'none' : 'block';
     openBody.innerHTML = data.open_trades.map(t => `
       <tr>
-        <td>${t.symbol}</td><td>${sideBadge(t.side)}</td>
+        <td>${t.symbol}${t.status === 'PENDING' ? '<br><span class="badge rejected">سفارش لیمیت در انتظار</span>' : ''}
+          ${t.timeframe ? `<br><span class="hint">${t.timeframe}</span>` : ''}</td><td>${sideBadge(t.side)}</td>
         <td>${fmt(t.entry)}</td>
         <td>${fmt(t.live_price)}</td>
         <td>${fmt(t.sl)}</td><td>${fmt(t.tp)}</td>
@@ -967,6 +1018,17 @@ async function initBacktestControls(){
       document.getElementById('btStrictness').value = data.strictness;
       btStrictnessInitialized = true;
     }
+    const btTf = document.getElementById('btTimeframe');
+    if(!btTf.options.length){
+      btTf.innerHTML = Object.entries(data.timeframe_profiles).map(([k,p]) => `<option value="${k}">${p.label}</option>`).join('');
+      btTf.value = data.timeframe;
+      document.getElementById('btEntryMode').value = data.entry_mode;
+    }
+    const cmpTf = document.getElementById('cmpTfChecks');
+    if(!cmpTf.innerHTML){
+      cmpTf.innerHTML = Object.entries(data.timeframe_profiles).map(([k,p]) => `
+        <label class="switch-label" title="حداکثر ${p.max_days} روز، ${p.symbols} نماد"><input type="checkbox" data-tf="${k}" ${['15m','1h','4h'].includes(k)?'checked':''}> ${p.label}</label>`).join('');
+    }
     renderStrategyChecks('btStrategyChecks', data.available_strategies, btActiveStrategies, (chosen) => {
       btActiveStrategies = chosen.length ? chosen : ['dow_support_resistance'];
     });
@@ -984,6 +1046,8 @@ document.getElementById('btStartBtn').addEventListener('click', async () => {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({
       days, top_n: topN, strictness,
+      timeframe: document.getElementById('btTimeframe').value,
+      entry_mode: document.getElementById('btEntryMode').value,
       min_sl: document.getElementById('btMinSl').checked,
       room: document.getElementById('btRoom').checked,
       btc_filter: document.getElementById('btBtc').checked,
@@ -1001,6 +1065,7 @@ document.getElementById('btStartBtn').addEventListener('click', async () => {
   msg.innerText = '';
   document.getElementById('btProgressRow').style.display = 'flex';
   document.getElementById('btResults').style.display = 'none';
+  document.getElementById('btDownloadBtn').style.display = 'none';
   document.getElementById('btStartBtn').disabled = true;
   pollBacktest(data.job_id);
 });
@@ -1027,7 +1092,12 @@ function pollBacktest(jobId){
         document.getElementById('btStartBtn').disabled = false;
         const r = await fetch(`/api/backtest/result/${jobId}`);
         const result = await r.json();
-        if(result.ok) renderBacktestResult(result.result);
+        if(result.ok){
+          renderBacktestResult(result.result);
+          const dl = document.getElementById('btDownloadBtn');
+          dl.style.display = 'inline-block';
+          dl.onclick = () => { window.location = `/api/backtest/download/${jobId}`; };
+        }
       } else if(st.state === 'error'){
         clearInterval(btPollTimer);
         document.getElementById('btProgressRow').style.display = 'none';
@@ -1167,6 +1237,7 @@ document.getElementById('cmpStartBtn').addEventListener('click', async () => {
       days: parseInt(document.getElementById('cmpDays').value),
       top_n: parseInt(document.getElementById('cmpTopN').value),
       grid: document.getElementById('cmpGrid').value,
+      timeframes: [...document.querySelectorAll('#cmpTfChecks input:checked')].map(x => x.dataset.tf),
     })
   });
   const data = await res.json();
@@ -1217,7 +1288,7 @@ async function loadCompareList(selectId){
     sel.innerHTML = '<option value="">— انتخاب گزارش —</option>' + data.reports.map(r => {
       const d = r.created_at ? new Date(r.created_at+'Z').toLocaleString('fa-IR') : '';
       const st = r.status === 'robust' ? '✓' : (r.status === 'failed_oos' ? '✗' : '·');
-      return `<option value="${r.job_id}">${st} ${d} — ${r.days} روز، ${r.symbols} نماد، ${r.n_configs} تنظیم</option>`;
+      return `<option value="${r.job_id}">${st} ${d} — ${(r.timeframes||[]).join('/') || '15m'}، ${r.days} روز، ${r.symbols} نماد، ${r.n_configs} تنظیم</option>`;
     }).join('');
     if(selectId) sel.value = selectId;
     if(data.running_job && !cmpPollTimer) pollCompare(data.running_job);
@@ -1234,6 +1305,9 @@ async function loadCompareReport(jobId){
   if(!data.ok) return;
   cmpCurrentReport = data.report;
   renderCompareReport(data.report);
+  const dl = document.getElementById('cmpDownloadBtn');
+  dl.style.display = 'inline-block';
+  dl.onclick = () => { window.location = `/api/compare/download/${jobId}`; };
 }
 
 function configButtons(idx, source){
@@ -1261,8 +1335,11 @@ function backtestCompareConfig(source, idx){
   const conf = pickConfig(source, idx);
   if(!conf) return;
   const m = cmpCurrentReport.meta;
-  document.getElementById('btDays').value = String(m.days >= 700 ? 730 : (m.days >= 360 ? 365 : 180));
-  document.getElementById('btTopN').value = m.symbols.length;
+  const tfm = (m.timeframes || {})[conf.timeframe] || {};
+  const d = tfm.days || m.days;
+  document.getElementById('btTimeframe').value = conf.timeframe || '15m';
+  document.getElementById('btDays').value = String(d >= 700 ? 730 : (d >= 360 ? 365 : (d >= 170 ? 180 : 60)));
+  document.getElementById('btTopN').value = (tfm.symbols || m.symbols || []).length;
   document.getElementById('btStrictness').value = conf.strictness;
   document.getElementById('btTrailing').checked = conf.trailing;
   document.getElementById('btMinSl').checked = conf.min_sl;
@@ -1280,12 +1357,13 @@ function renderCompareReport(r){
   document.getElementById('cmpResults').style.display = 'block';
   const m = r.meta, rec = r.recommendation;
   const dt = ms => new Date(ms).toLocaleDateString('fa-IR');
-  const segTable = (x) => `
+  const tfMeta = (x) => (m.timeframes || {})[x.config.timeframe] || m;
+  const segTable = (x) => { const t = tfMeta(x); return `
     <table class="mini"><thead><tr><th>بخش</th><th>معاملات</th><th>وین‌ریت</th><th>میانگین R</th><th>ضریب سود</th><th>بازده</th><th>بیشینه افت</th></tr></thead><tbody>
-      <tr><td>آموزش (${dt(m.start_ms)} تا ${dt(m.split_ms)})</td>${segCells(x.is)}</tr>
-      <tr><td><b>آزمون — دیده‌نشده</b> (${dt(m.split_ms)} تا ${dt(m.end_ms)})</td>${segCells(x.oos)}</tr>
+      <tr><td>آموزش (${dt(t.start_ms)} تا ${dt(t.split_ms)})</td>${segCells(x.is)}</tr>
+      <tr><td><b>آزمون — دیده‌نشده</b> (${dt(t.split_ms)} تا ${dt(t.end_ms)})</td>${segCells(x.oos)}</tr>
       <tr><td>کل بازه</td>${segCells(x.full)}</tr>
-    </tbody></table>`;
+    </tbody></table>`; };
   const badge = {robust:'✅ برنده در دیتای دیده‌نشده هم سودده موند', failed_oos:'⚠️ برنده در دیتای دیده‌نشده رد شد', none:'⚠️ دیتای کافی نبود'}[rec.status] || '';
   let html = `<div class="rec-card ${rec.status}"><div class="hint">${badge}</div>`;
   if(rec.best){
@@ -1308,6 +1386,13 @@ function renderCompareReport(r){
       <td>${b.full.profit_factor}</td><td>${pctCell(b.full.return_pct)}</td><td>${b.full.max_dd_pct}%</td>
       <td><button class="link-btn" onclick="backtestCompareConfig('base', ${i})">بک‌تست کامل</button></td></tr>`).join('') + '</tbody>';
 
+  document.getElementById('cmpTimeframes').innerHTML = `<thead><tr><th>تایم‌فریم</th><th>روز / نماد</th><th>تنظیم‌ها</th><th>٪ سودده (کل)</th><th>٪ قبول در آزمون</th><th>بهترین تنظیم</th><th>آزمون: معاملات</th><th>آزمون R</th><th>آزمون بازده</th></tr></thead><tbody>` +
+    (r.timeframe_summary||[]).map(t => `<tr><td><b>${t.label}</b></td><td>${t.days} / ${t.symbols}</td><td>${t.configs}</td>
+      <td>${t.positive_share_pct}%</td><td>${t.oos_ok_share_pct}%</td>
+      <td class="hint" style="white-space:normal; max-width:320px;">${t.best_label || 'کم‌نمونه'}</td>
+      <td>${t.best_oos ? t.best_oos.trades : '—'}</td><td>${t.best_oos ? rCell(t.best_oos.avg_r) : '—'}</td>
+      <td>${t.best_oos ? pctCell(t.best_oos.return_pct) : '—'}</td></tr>`).join('') + '</tbody>';
+
   document.getElementById('cmpImprovements').innerHTML = `<thead><tr><th>مورد</th><th>تعداد جفت</th><th>درصد مواردی که بهتر شد</th><th>تغییر میانه‌ی R (کل)</th><th>تغییر میانه‌ی R (آزمون)</th><th>تغییر میانه‌ی بازده</th></tr></thead><tbody>` +
     (r.improvements||[]).map(e => `<tr><td>${e.label}</td><td>${e.pairs}</td>
       <td><b class="${e.improved_pct>=60?'num-pos':(e.improved_pct<=40?'num-neg':'')}">${e.improved_pct}%</b></td>
@@ -1325,12 +1410,14 @@ function renderCompareReport(r){
       <td>${x.oos.trades}</td><td>${x.oos.win_rate}%</td><td>${rCell(x.oos.avg_r)}</td><td>${x.oos.profit_factor}</td><td>${pctCell(x.oos.return_pct)}</td><td>${x.oos.max_dd_pct}%</td>
       <td>${x.eligible ? (x.oos_ok ? '✅' : '❌') : '<span class="hint">کم‌نمونه</span>'}</td><td>${configButtons(i,'top')}</td></tr>`).join('') + '</tbody>';
 
-  const failed = Object.entries(m.data||{}).filter(([k,v]) => !v.ok).map(([k,v]) => `${k} (${v.error})`);
+  const failed = [];
+  Object.entries(m.timeframes||{}).forEach(([tf, t]) => Object.entries(t.data||{}).forEach(([k,v]) => { if(!v.ok) failed.push(`${tf}:${k} (${v.error})`); }));
   document.getElementById('cmpMethod').innerHTML = `
-    <b>روش:</b> ${m.n_configs} تنظیم روی ${m.symbols.length} نماد و ${m.days} روز دیتای کندل ${'۱۵ دقیقه‌ای'} در ${fmt(m.total_elapsed_sec||m.elapsed_sec,0)} ثانیه اجرا شد.
+    <b>روش:</b> ${m.n_configs} تنظیم در ${Object.keys(m.timeframes||{}).length || 1} تایم‌فریم، روی ${(m.symbols||[]).length} نماد پرحجم، در ${fmt(m.total_elapsed_sec||m.elapsed_sec,0)} ثانیه اجرا شد
+    (برای هر تایم‌فریم اول همه‌ی استراتژی‌های تکی و ترکیب‌های دوتایی، بعد بهترین‌هاشون با همه‌ی تنظیمات). ورود: ${m.entry_mode === 'market' ? 'سفارش بازار' : 'سفارش لیمیت (فقط اگه پر بشه)'}، فاندینگ ${m.fees?.funding_8h ?? 0}% هر ۸ ساعت.
     بازه به دو بخش تقسیم شد: ۷۰٪ اول برای «انتخاب» و ۳۰٪ آخر فقط برای «آزمون». رتبه‌بندی با کران پایین ۹۵٪ میانگین R هر معامله (بعد از کارمزد
-    میکر ${m.fees?.maker}% / تیکر ${m.fees?.taker}% + اسلیپیج ${m.fees?.slippage}%) انجام شد؛ تنظیمی که کمتر از ${m.min_is_trades} معامله در بخش آموزش
-    یا ${m.min_oos_trades} معامله در بخش آزمون داشته، قابل‌انتخاب نیست. حد ضرر/سود با سایه‌ی کندل و فرض بدبینانه (اگه یک کندل هر دو رو لمس کنه، اول ضرر) حساب شده.
+    میکر ${m.fees?.maker}% / تیکر ${m.fees?.taker}% + اسلیپیج ${m.fees?.slippage}%) انجام شد؛ تنظیمی که کمتر از ${Object.values(m.timeframes||{})[0]?.min_is_trades ?? m.min_is_trades} معامله در بخش آموزش
+    یا ${Object.values(m.timeframes||{})[0]?.min_oos_trades ?? m.min_oos_trades} معامله در بخش آزمون داشته، قابل‌انتخاب نیست (برای بازه‌های کوتاه‌تر مثل اسکلپ، حداقل‌ها متناسب کمتره). حد ضرر/سود با سایه‌ی کندل و فرض بدبینانه (اگه یک کندل هر دو رو لمس کنه، اول ضرر) حساب شده.
     <br><b>هشدار صادقانه:</b> هرچی تعداد تنظیم‌های آزمایش‌شده بیشتر باشه، احتمال این‌که برنده فقط «خوش‌شانس» بوده بیشتره — برای همین نتیجه‌ی بخش آزمون از رتبه‌ی بخش آموزش مهم‌تره،
     و حتی برنده‌ی قبول‌شده هم باید قبل از پول واقعی، روی ربات زنده (مجازی) حداقل ۱۰۰ معامله نتیجه‌ی مشابه بده. نمادها بر اساس حجم امروز انتخاب شدن (سوگیری بقا: ارزهایی که در این دو سال مُردن، در تست نیستن).
     ${failed.length ? '<br><b>نمادهای بدون دیتا:</b> ' + failed.join('، ') : ''}`;

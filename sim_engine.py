@@ -59,20 +59,23 @@ class PathSim:
             return s.o[k:k1], s.h[k:k1], s.l[k:k1], s.c[k:k1]
         return -s.o[k:k1], -s.l[k:k1], -s.h[k:k1], -s.c[k:k1]
 
-    def run(self, t0, side, entry, sl0, tp, trailing):
-        key = (t0, side, entry, sl0, tp, trailing)
+    def run(self, t0, side, entry, sl0, tp, trailing, max_bars=0):
+        key = (t0, side, entry, sl0, tp, trailing, max_bars)
         hit = self.cache.get(key)
         if hit is not None:
             return hit
-        res = self._run(t0, side, entry, sl0, tp, trailing)
+        res = self._run(t0, side, entry, sl0, tp, trailing, max_bars)
         self.cache[key] = res
         return res
 
-    def _run(self, t0, side, entry, sl0, tp, trailing):
+    def _run(self, t0, side, entry, sl0, tp, trailing, max_bars=0):
+        """مدیریت از کندل t0+1. max_bars>0 یعنی حد زمانی: اگه تا اون تعداد کندل بسته نشد،
+        در قیمت بسته شدن آخرین کندل مجاز با سفارش بازار بسته می‌شه (TIME)."""
         sgn = 1.0 if side == se.LONG else -1.0
         E, SL0, TP = sgn * entry, sgn * sl0, sgn * tp
         risk = abs(entry - sl0)
-        n = self.s.n
+        n_all = self.s.n
+        n = min(n_all, t0 + 1 + max_bars) if max_bars and max_bars > 0 else n_all
         k = t0 + 1
         cur_sl, peak = SL0, E
         trailing = trailing and self.has_ladder and risk > 0
@@ -111,6 +114,8 @@ class PathSim:
                 peak, cur_sl = P[-1], SLk[-1]
             k = k1
             chunk = min(chunk * 4, 20000)
+        if n < n_all:
+            return (n - 1, float(self.s.c[n - 1]), "TIME", None, sgn * peak)
         # تا آخر دیتا باز مونده: با آخرین قیمت (به‌صورت سفارش بازار) بسته حساب می‌شه
         return (n - 1, float(self.s.c[n - 1]), "END", None, sgn * peak)
 
@@ -122,6 +127,8 @@ class SimParams:
 
     def __init__(self, cfg, htf_min_agreement, trailing, allow_long=True, allow_short=True,
                  btc_filter=False, risk_pct=None):
+        """htf_min_agreement: مقیاس «از ۵» (مثل پیش‌تنظیم‌های سخت‌گیری)؛ برای پروفایل‌هایی
+        که تعداد تایم‌فریم تایید متفاوتی دارن، متناسب تبدیل می‌شه."""
         self.start_balance = float(cfg.VIRTUAL_BALANCE_START)
         self.risk_pct = float(risk_pct if risk_pct is not None else cfg.RISK_PER_TRADE_PCT)
         self.min_notional = cfg.MIN_NOTIONAL_USD
@@ -134,13 +141,37 @@ class SimParams:
         self.taker = getattr(cfg, "TAKER_FEE_PCT", 0.0)
         self.slip = getattr(cfg, "TAKER_SLIPPAGE_PCT", 0.0)
         self.use_htf = bool(getattr(cfg, "USE_HTF_CONFIRMATION", True))
-        self.htf_min_long = int(htf_min_agreement)
         n_tf = len(getattr(cfg, "HTF_TIMEFRAMES", []))
-        self.htf_min_short = min(n_tf, int(htf_min_agreement) + int(getattr(cfg, "SHORT_EXTRA_HTF_AGREEMENT", 0)))
+        self.htf_min_long, self.htf_min_short = htf_required(htf_min_agreement, n_tf,
+                                                             getattr(cfg, "SHORT_EXTRA_HTF_AGREEMENT", 0))
         self.trailing = bool(trailing)
         self.allow_long = bool(allow_long)
         self.allow_short = bool(allow_short)
         self.btc_filter = bool(btc_filter)
+        # اجرای سفارش و هزینه‌ها
+        self.entry_mode = getattr(cfg, "ENTRY_MODE", "limit")
+        tf_ms = _tf_ms(getattr(cfg, "TIMEFRAME", "15m"))
+        self.tf_ms = tf_ms
+        self.limit_wait_bars = max(1, int(getattr(cfg, "LIMIT_WAIT_BARS", 1)))
+        hold_min = float(getattr(cfg, "MAX_HOLD_MINUTES", 0) or 0)
+        self.max_hold_bars = int(math.ceil(hold_min * 60_000 / tf_ms)) if hold_min > 0 else 0
+        self.funding_8h = float(getattr(cfg, "FUNDING_PCT_PER_8H", 0.0) or 0.0)
+
+
+def _tf_ms(tf):
+    import market_data
+    return market_data.TF_MS.get(tf, 900_000)
+
+
+def htf_required(preset_of_5, n_tf, short_extra=0):
+    """حداقل تعداد تایید برای خرید/فروش. پیش‌تنظیم‌ها بر اساس ۵ تایم‌فریم تعریف شدن
+    (۲، ۳، ۴، ۵ از ۵)؛ برای n تایم‌فریم به همون نسبت گرد به بالا تبدیل می‌شن."""
+    n_tf = int(n_tf)
+    if n_tf <= 0:
+        return 0, 0
+    req = int(preset_of_5) if n_tf == 5 else int(math.ceil(int(preset_of_5) * n_tf / 5.0 - 1e-9))
+    req = max(1, min(n_tf, req))
+    return req, min(n_tf, req + int(short_extra))
 
 
 def merge_candidates(per_symbol, preps, symbol_order):
@@ -179,7 +210,7 @@ def merge_candidates(per_symbol, preps, symbol_order):
     return m
 
 
-def run_portfolio(merged, preps, symbol_order, P, record=False, end_time_ms=None):
+def run_portfolio(merged, preps, symbol_order, P, record=False):
     """
     اجرای ترتیبی سبد، دقیقاً با ترتیب چک‌های ربات زنده:
     پوزیشن باز روی همین نماد → کول‌داون → جهت مجاز → رژیم BTC → تایید HTF → باز کردن
@@ -225,12 +256,13 @@ def run_portfolio(merged, preps, symbol_order, P, record=False, end_time_ms=None
     def flush(until):
         nonlocal balance, locked
         while heap and heap[0][0] <= until:
-            exit_t, _, sym_rank, margin, pnl = heapq.heappop(heap)
-            balance += pnl
+            exit_t, _, sym_rank, margin, pnl, real_trade = heapq.heappop(heap)
             locked -= margin
             open_by_sym.pop(sym_rank, None)
-            last_close[sym_rank] = exit_t
-            equity.append((exit_t, balance))
+            if real_trade:
+                balance += pnl
+                last_close[sym_rank] = exit_t
+                equity.append((exit_t, balance))
 
     for j in iter_idx.tolist():
         T = int(times[j])
@@ -260,7 +292,26 @@ def run_portfolio(merged, preps, symbol_order, P, record=False, end_time_ms=None
             continue
 
         side_str = "LONG" if side == se.LONG else "SHORT"
-        entry, sl, tp = float(entries[j]), float(sls[j]), float(tps[j])
+        sl, tp = float(sls[j]), float(tps[j])
+        prep = preps[symbol_order[sr]]
+        ser = prep.series
+        t = int(t_idx[j])
+        if t + 1 >= ser.n:
+            continue   # سیگنال روی آخرین کندل دیتا؛ کندلی برای اجرا نمونده
+        entry_taker = P.entry_mode == "market"
+        if entry_taker:
+            # ورود با سفارش بازار در قیمت باز شدن کندل بعد + اسلیپیج
+            o_next = float(ser.o[t + 1])
+            entry = o_next * (1 + P.slip / 100) if side == se.LONG else o_next * (1 - P.slip / 100)
+            bad = (entry <= sl or entry >= tp) if side == se.LONG else (entry >= sl or entry <= tp)
+            if bad:
+                if record:
+                    sig["reason"] = "gap_past_level"
+                    signals.append(sig)
+                continue
+        else:
+            entry = float(entries[j])
+
         pos = paper_trader.compute_position_size(
             side_str, entry, sl, P.risk_pct, balance, locked, len(open_by_sym),
             min_notional=P.min_notional, max_open_positions=P.max_open, max_leverage=P.max_leverage,
@@ -272,19 +323,39 @@ def run_portfolio(merged, preps, symbol_order, P, record=False, end_time_ms=None
                 signals.append(sig)
             continue
 
-        prep = preps[symbol_order[sr]]
-        exit_i, exit_price, kind, level, peak = prep.paths.run(int(t_idx[j]), side, entry, sl, tp, P.trailing)
+        if entry_taker:
+            t0, fill_t = t, int(ser.close_ts[t])
+        else:
+            # سفارش لیمیت: فقط اگه قیمت در چند کندل بعد واقعاً از قیمت ورود رد بشه، پر می‌شه
+            k_end = min(ser.n - 1, t + P.limit_wait_bars)
+            window = ser.l[t + 1:k_end + 1] < entry if side == se.LONG else ser.h[t + 1:k_end + 1] > entry
+            if not window.any():
+                # پر نشد: مارجین و جای پوزیشن تا انقضای سفارش رزرو بود، بعد آزاد (بدون کول‌داون)
+                seq += 1
+                heapq.heappush(heap, (int(ser.close_ts[k_end]), seq, sr, pos["margin"], 0.0, False))
+                open_by_sym[sr] = True
+                locked += pos["margin"]
+                if record:
+                    sig["reason"] = "limit_not_filled"
+                    signals.append(sig)
+                continue
+            k_fill = t + 1 + int(np.argmax(window))
+            t0, fill_t = k_fill - 1, int(ser.close_ts[k_fill - 1])
+
+        exit_i, exit_price, kind, level, peak = prep.paths.run(t0, side, entry, sl, tp, P.trailing,
+                                                               P.max_hold_bars)
         exit_type = paper_trader.classify_exit_level(kind, level, sl, entry, P.trailing)
         size = pos["size"]
         gross = (exit_price - entry) * size if side == se.LONG else (entry - exit_price) * size
-        fee, _, _, _ = paper_trader._fee_for_exit(entry, exit_price, size, exit_type, P.maker, P.taker, P.slip)
+        fee, _, _, _ = paper_trader._fee_for_exit(entry, exit_price, size, exit_type, P.maker, P.taker, P.slip,
+                                                  entry_taker=entry_taker)
+        exit_t = int(ser.close_ts[exit_i])
+        funding = paper_trader.funding_cost(pos["notional"], fill_t, exit_t, P.funding_8h)
+        fee += funding
         pnl = gross - fee
-        exit_t = int(prep.series.close_ts[exit_i])
-        if kind == "END" and end_time_ms is not None:
-            exit_t = max(exit_t, T)
         risk_usd = pos["per_unit_risk"] * size
         seq += 1
-        heapq.heappush(heap, (exit_t, seq, sr, pos["margin"], pnl))
+        heapq.heappush(heap, (exit_t, seq, sr, pos["margin"], pnl, True))
         open_by_sym[sr] = True
         locked += pos["margin"]
         trades.append({
@@ -292,8 +363,9 @@ def run_portfolio(merged, preps, symbol_order, P, record=False, end_time_ms=None
             "size": size, "notional": pos["notional"], "margin": pos["margin"], "leverage": pos["leverage"],
             "liquidation_price": pos["liquidation_price"], "strategy": labels[j],
             "open_time": T, "close_time": exit_t, "close_price": float(exit_price), "pnl": pnl, "fee": fee,
-            "exit_type": exit_type, "rr": float(rrs[j]), "htf_agree": htf_agree if P.use_htf else None,
-            "R": pnl / risk_usd if risk_usd > 0 else 0.0, "peak": float(peak), "bars": int(exit_i - t_idx[j]),
+            "funding": funding, "exit_type": exit_type, "rr": float(rrs[j]),
+            "htf_agree": htf_agree if P.use_htf else None,
+            "R": pnl / risk_usd if risk_usd > 0 else 0.0, "peak": float(peak), "bars": int(exit_i - t),
         })
         if record:
             sig["opened"] = 1

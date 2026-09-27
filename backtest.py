@@ -51,13 +51,22 @@ def get_cache(cfg):
         return _cache["obj"]
 
 
-def run_backtest(symbols, days, live_config, overrides=None, progress_cb=None):
+def run_backtest(symbols, days, live_config, overrides=None, progress_cb=None, timeframe=None):
     """
     اجرای کامل بک‌تست، برمی‌گردونه: (conn, meta)
     conn: دیتابیس SQLite در حافظه با همون ساختار جدول trades/equity/signal_log ربات زنده
     meta: جزئیات هر نماد + نتایج جداگانه‌ی بخش اول/دوم بازه
     """
     cfg = build_config(live_config, overrides)
+    tf = timeframe or getattr(cfg, "TIMEFRAME", "15m")
+    if tf in getattr(cfg, "TIMEFRAME_PROFILES", {}):
+        # پروفایل همون تایم‌فریم (تایم‌فریم‌های تایید، کول‌داون، حد زمانی و ...) + بازنویسی‌های کاربر
+        cfg = fast_backtest.profile_cfg(cfg, tf)
+        for k, v in (overrides or {}).items():
+            setattr(cfg, k, v)
+        prof = cfg.TIMEFRAME_PROFILES[tf]
+        days = min(int(days), int(prof["MAX_DAYS"]))
+        symbols = list(symbols)[:int(prof["SCAN_SYMBOLS"])]
     started = datetime.utcnow().isoformat()
     symbols = [s for s in symbols if data_fetcher.is_symbol_allowed(s, cfg)]
 
@@ -83,5 +92,7 @@ def run_backtest(symbols, days, live_config, overrides=None, progress_cb=None):
         "full": sim_engine.metrics(res["trades"], res["equity"], P.start_balance),
     }
     meta = {"symbols": sym_meta, "start_time": started, "end_time": datetime.utcnow().isoformat(),
-            "engine": "fast-v2", "segments": segments, "cache_mb": cache.disk_usage_mb()}
+            "engine": "fast-v3", "segments": segments, "cache_mb": cache.disk_usage_mb(),
+            "timeframe": cfg.TIMEFRAME, "days": days, "entry_mode": getattr(cfg, "ENTRY_MODE", "limit")}
+    meta["_cfg"] = cfg
     return conn, meta

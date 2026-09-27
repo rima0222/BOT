@@ -29,7 +29,9 @@ import strategies
 import paper_trader
 import backtest
 import backtest_analyzer
+import fast_backtest
 import market_data
+import sim_engine
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("tradingbot")
@@ -118,6 +120,12 @@ def get_bot_settings():
     room = flag("room_to_target", getattr(config, "REQUIRE_ROOM_TO_TARGET", False))
     btc_filter = flag("btc_filter", getattr(config, "BTC_REGIME_FILTER", False))
     long_only = flag("long_only", not getattr(config, "ALLOW_SHORT", True))
+    timeframe = paper_trader.get_setting(conn, "timeframe", config.DEFAULT_TIMEFRAME)
+    if timeframe not in config.TIMEFRAME_PROFILES:
+        timeframe = config.DEFAULT_TIMEFRAME
+    entry_mode = paper_trader.get_setting(conn, "entry_mode", config.ENTRY_MODE)
+    if entry_mode not in ("limit", "market"):
+        entry_mode = config.ENTRY_MODE
 
     return {
         "running": running,
@@ -133,13 +141,16 @@ def get_bot_settings():
         "room": room,
         "btc_filter": btc_filter,
         "long_only": long_only,
+        "timeframe": timeframe,
+        "entry_mode": entry_mode,
     }
 
 
 def live_config_snapshot(settings=None):
     """تنظیمات فعلی ربات زنده به همون فرمتی که «مقایسه‌ی استراتژی‌ها» می‌فهمه."""
     st = settings or get_bot_settings()
-    return {"active_strategies": st["active_strategies"], "combine_mode": st["combine_mode"],
+    return {"timeframe": st["timeframe"], "active_strategies": st["active_strategies"],
+            "combine_mode": st["combine_mode"],
             "strictness": st["strictness"], "trailing": st["trailing_enabled"], "min_sl": st["min_sl"],
             "room": st["room"], "btc_filter": st["btc_filter"], "long_only": st["long_only"]}
 
@@ -186,28 +197,34 @@ def get_effective_cfg(settings):
         "MIN_SL_PCT": config.TEST_MIN_SL_PCT if settings["min_sl"] else 0.0,
         "MIN_SL_ATR_MULT": config.TEST_MIN_SL_ATR_MULT if settings["min_sl"] else 0.0,
         "REQUIRE_ROOM_TO_TARGET": settings["room"],
+        "ENTRY_MODE": settings["entry_mode"],
     }
-    return backtest.build_config(config, overrides)
+    # پروفایل تایم‌فریم انتخاب‌شده (تایم‌فریم‌های تایید، کول‌داون، حد زمانی، ...)
+    cfg = fast_backtest.profile_cfg(config, settings["timeframe"])
+    for k, v in overrides.items():
+        setattr(cfg, k, v)
+    return cfg
 
 
 # روند BTC برای فیلتر رژیم بازار — هر اسکن یک‌بار حساب می‌شه، نه برای هر نماد
 btc_regime_state = {"trend": None, "time": 0}
 
 
-def get_btc_regime():
+def get_btc_regime(cfg):
     now = time.time()
-    if btc_regime_state["trend"] is not None and now - btc_regime_state["time"] < 300:
+    tf = getattr(cfg, "BTC_REGIME_TIMEFRAME", config.BTC_REGIME_TIMEFRAME)
+    if btc_regime_state["trend"] is not None and btc_regime_state.get("tf") == tf \
+            and now - btc_regime_state["time"] < 60:
         return btc_regime_state["trend"]
-    df = fetch_symbol_df(config.BTC_REGIME_SYMBOL, timeframe=config.BTC_REGIME_TIMEFRAME,
-                         limit=config.HTF_CANDLE_LIMIT)
+    df = fetch_symbol_df(config.BTC_REGIME_SYMBOL, timeframe=tf, limit=config.HTF_CANDLE_LIMIT)
     trend = None
     if df is not None and len(df) >= config.SWING_ORDER * 2 + 5:
         trend = analysis.trend_from_df(df, swing_order=config.SWING_ORDER)
-    btc_regime_state.update({"trend": trend, "time": now})
+    btc_regime_state.update({"trend": trend, "time": now, "tf": tf})
     return trend
 
 
-def check_htf_confirmation(symbol, side, min_agreement):
+def check_htf_confirmation(symbol, side, min_agreement, htf_timeframes=None):
     """
     تایید چند-تایم‌فریمی: فقط برای سیگنال‌های کاندید صدا زده می‌شه (نه برای هر نماد)،
     پس هزینه‌ی شبکه‌اش تقریباً ناچیزه. روند رو توی تایم‌فریم‌های بالاتر چک می‌کنه و
@@ -221,7 +238,8 @@ def check_htf_confirmation(symbol, side, min_agreement):
     wanted_trend = "uptrend" if side == "LONG" else "downtrend"
     opposite_trend = "downtrend" if side == "LONG" else "uptrend"
 
-    for tf in config.HTF_TIMEFRAMES:
+    htf_timeframes = htf_timeframes or config.HTF_TIMEFRAMES
+    for tf in htf_timeframes:
         df = fetch_symbol_df(symbol, timeframe=tf, limit=config.HTF_CANDLE_LIMIT)
         if df is None or len(df) < (config.SWING_ORDER * 2 + 5):
             continue
@@ -235,7 +253,7 @@ def check_htf_confirmation(symbol, side, min_agreement):
             neutral += 1
 
     ok = agree >= min_agreement
-    detail = f"موافق={agree}/{len(config.HTF_TIMEFRAMES)} (حداقل لازم={min_agreement}) مخالف={disagree} خنثی={neutral} ({', '.join(checked)})"
+    detail = f"موافق={agree}/{len(htf_timeframes)} (حداقل لازم={min_agreement}) مخالف={disagree} خنثی={neutral} ({', '.join(checked)})"
     return ok, detail, agree
 
 
@@ -243,11 +261,11 @@ def scan_symbol(symbol, settings):
     if not data_fetcher.is_symbol_allowed(symbol, config):
         return  # فیلتر مطلق: طلا و استیبل‌کوین به استیبل‌کوین هیچ‌وقت معامله نمی‌شن
 
+    cfg = get_effective_cfg(settings)
     # فقط کندل‌های بسته‌شده؛ چند کندل اضافه برای حالت ترکیب «تاییدی»
-    df = fetch_symbol_df(symbol, limit=config.CANDLE_LIMIT + config.CONFIRM_LOOKBACK_BARS)
+    df = fetch_symbol_df(symbol, timeframe=cfg.TIMEFRAME, limit=config.CANDLE_LIMIT + config.CONFIRM_LOOKBACK_BARS)
     if df is None or len(df) < (config.SWING_ORDER * 2 + 5):
         return
-    cfg = get_effective_cfg(settings)
     result = strategies.generate_combined_signal(df, cfg)
     latest_analysis[symbol] = result
     if symbol not in latest_prices:
@@ -272,7 +290,7 @@ def scan_symbol(symbol, settings):
         return  # از قبل پوزیشن باز داره؛ این یه سیگنال جدید مستقل نیست که رد بشه
 
     # ۱) کول‌داون
-    if paper_trader.is_in_cooldown(conn, symbol, config.COOLDOWN_HOURS):
+    if paper_trader.is_in_cooldown(conn, symbol, cfg.COOLDOWN_HOURS):
         reject("cooldown")
         return
 
@@ -281,29 +299,47 @@ def scan_symbol(symbol, settings):
         reject("side_disabled")
         return
     if settings["btc_filter"]:
-        btc_trend = get_btc_regime()
+        btc_trend = get_btc_regime(cfg)
         if (sig["side"] == "LONG" and btc_trend == "downtrend") or (sig["side"] == "SHORT" and btc_trend == "uptrend"):
             reject("btc_regime")
             return
 
     # ۳) تایید چند-تایم‌فریمی با سطح سخت‌گیری فعلی (SHORT به تاییدیه‌ی بیشتری نیاز داره)
-    min_agreement = settings["htf_min_agreement"]
-    if sig["side"] == "SHORT":
-        min_agreement = min(len(config.HTF_TIMEFRAMES), min_agreement + config.SHORT_EXTRA_HTF_AGREEMENT)
-    htf_ok, htf_detail, htf_agree = check_htf_confirmation(symbol, sig["side"], min_agreement)
+    req_long, req_short = sim_engine.htf_required(settings["htf_min_agreement"], len(cfg.HTF_TIMEFRAMES),
+                                                  config.SHORT_EXTRA_HTF_AGREEMENT)
+    min_agreement = req_short if sig["side"] == "SHORT" else req_long
+    htf_ok, htf_detail, htf_agree = check_htf_confirmation(symbol, sig["side"], min_agreement, cfg.HTF_TIMEFRAMES)
     if not htf_ok:
         log.info(f"[رد شد - عدم تایید تایم‌فریم بالاتر] {symbol} {sig['side']} | {htf_detail}")
         reject("htf_disagreement", htf_agree)
         return
 
-    # ۴) باز کردن پوزیشن مجازی (با رعایت واقعی سرمایه، لوریج ایمن و سقف تنوع)
+    # ۴) ثبت سفارش (لیمیت در انتظار) یا ورود بازار — با رعایت سرمایه، لوریج ایمن و سقف تنوع
+    tf_ms = market_data.TF_MS[cfg.TIMEFRAME]
+    entry_taker = settings["entry_mode"] == "market"
+    entry_price = sig["entry"]
+    if entry_taker:
+        px = latest_1m_price(symbol)
+        if px is None:
+            reject("no_price")
+            return
+        slip = config.TAKER_SLIPPAGE_PCT / 100
+        entry_price = px * (1 + slip) if sig["side"] == "LONG" else px * (1 - slip)
+        bad = (entry_price <= sig["sl"] or entry_price >= sig["tp"]) if sig["side"] == "LONG" \
+            else (entry_price >= sig["sl"] or entry_price <= sig["tp"])
+        if bad:
+            reject("gap_past_level")
+            return
+    candle_close_ms = int(df["timestamp"].values.astype("datetime64[ms]").astype("int64")[-1]) + tf_ms
     trade_res = paper_trader.open_trade(
-        conn, symbol, sig["side"], sig["entry"], sig["sl"], sig["tp"],
+        conn, symbol, sig["side"], entry_price, sig["sl"], sig["tp"],
         settings["risk_pct"], settings["initial_capital"],
         min_notional=config.MIN_NOTIONAL_USD, max_open_positions=config.MAX_OPEN_POSITIONS,
         max_leverage=config.MAX_LEVERAGE, leverage_safety_mult=config.LEVERAGE_SAFETY_MULTIPLIER,
         position_pct_cap=config.MAX_POSITION_PCT_OF_CAPITAL,
         trailing_enabled=settings["trailing_enabled"], strategy_name=strategy_name,
+        pending=not entry_taker, expire_ts=candle_close_ms + cfg.LIMIT_WAIT_BARS * tf_ms,
+        entry_taker=entry_taker, max_hold_min=cfg.MAX_HOLD_MINUTES, timeframe=cfg.TIMEFRAME,
     )
 
     paper_trader.log_signal(conn, symbol, sig["side"], strategy_name, sig["entry"], sig["sl"], sig["tp"],
@@ -323,9 +359,24 @@ def scan_symbol(symbol, settings):
         log.info(f"[سیگنال رد شد - {trade_res['reason']}] {symbol} {sig['side']}")
 
 
+def latest_1m_price(symbol):
+    try:
+        df, _ = data_fetcher.fetch_ohlcv_with_fallback(symbol, "1m", 2, config.EXCHANGE_TRY_ORDER)
+        return float(df["close"].iloc[-1])
+    except Exception:
+        return None
+
+
 def full_scan_job():
+    """هر دقیقه صدا زده می‌شه؛ فقط وقتی یک کندلِ تایم‌فریم انتخاب‌شده تازه بسته شده، اسکن می‌کنه."""
     settings = get_bot_settings()
-    for symbol in active_symbols["list"]:
+    tf = settings["timeframe"]
+    tf_ms = market_data.TF_MS[tf]
+    now_min = int(time.time() // 60) * 60_000
+    if now_min % tf_ms != 0:
+        return   # هنوز کندل جدیدی از این تایم‌فریم بسته نشده
+    n_symbols = int(config.TIMEFRAME_PROFILES[tf]["SCAN_SYMBOLS"])
+    for symbol in active_symbols["list"][:n_symbols]:
         try:
             scan_symbol(symbol, settings)
         except Exception as e:
@@ -345,14 +396,15 @@ def price_check_job():
     for symbol in open_symbols:
         try:
             rows = conn.execute(
-                "SELECT open_time, last_bar_ts FROM trades WHERE symbol=? AND status='OPEN'", (symbol,)
+                "SELECT open_time, last_bar_ts FROM trades WHERE symbol=? AND status IN ('OPEN','PENDING')",
+                (symbol,)
             ).fetchall()
             since = now_ms - 5 * 60_000
             for open_time, last_bar_ts in rows:
                 if last_bar_ts:
                     since = min(since, int(last_bar_ts) + 1)
                 elif open_time:
-                    o_ms = int(datetime.fromisoformat(open_time).timestamp() * 1000)
+                    o_ms = paper_trader.utc_ms(datetime.fromisoformat(open_time))
                     since = min(since, o_ms - (o_ms % 60_000))
             since = max(since, now_ms - 3 * 1000 * 60_000)
             raw, _ = data_fetcher.fetch_since(symbol, "1m", since, config.EXCHANGE_TRY_ORDER)
@@ -371,28 +423,18 @@ def price_check_job():
                 conn, symbol, closed, settings["initial_capital"],
                 config.TRAILING_SL_LADDER, config.TRAILING_SL_BEYOND_DISTANCE_R,
                 config.MAKER_FEE_PCT, config.TAKER_FEE_PCT, config.TAKER_SLIPPAGE_PCT,
+                config.FUNDING_PCT_PER_8H, now_ms=now_ms,
             )
         except Exception as e:
             log.warning(f"چک قیمت {symbol} با خطا مواجه شد: {e}")
 
 
-def _scan_trigger():
-    """اسکن درست چند ثانیه بعد از بسته شدن هر کندل (نه در زمان دلخواه وسط کندل)."""
-    tf_min = market_data.TF_MS.get(config.TIMEFRAME, 900_000) // 60_000
-    if 0 < tf_min < 60 and 60 % tf_min == 0:
-        return CronTrigger(minute=f"*/{tf_min}", second=8)
-    return None
-
-
 scheduler = BackgroundScheduler()
 scheduler.add_job(refresh_symbols_job, "interval", hours=config.SYMBOL_REFRESH_HOURS,
                    next_run_time=datetime.now())
-_trig = _scan_trigger()
-if _trig is not None:
-    scheduler.add_job(full_scan_job, _trig, max_instances=1, coalesce=True)
-else:
-    scheduler.add_job(full_scan_job, "interval", minutes=config.SCAN_INTERVAL_MINUTES,
-                      next_run_time=datetime.now(), max_instances=1, coalesce=True)
+# اسکن هر دقیقه ۸ ثانیه بعد از شروع دقیقه صدا زده می‌شه، ولی خودش فقط وقتی یک کندل از
+# تایم‌فریم انتخاب‌شده (۱ دقیقه تا ۴ ساعت) تازه بسته شده، کار می‌کنه.
+scheduler.add_job(full_scan_job, CronTrigger(second=8), max_instances=1, coalesce=True)
 scheduler.add_job(price_check_job, "interval", minutes=config.PRICE_CHECK_INTERVAL_MINUTES,
                    max_instances=1, coalesce=True)
 
@@ -477,6 +519,12 @@ def api_data():
         "room": settings["room"],
         "btc_filter": settings["btc_filter"],
         "long_only": settings["long_only"],
+        "timeframe": settings["timeframe"],
+        "entry_mode": settings["entry_mode"],
+        "timeframe_profiles": {k: {"label": v["label"], "max_days": v["MAX_DAYS"], "symbols": v["SCAN_SYMBOLS"],
+                                   "htf": v["HTF_TIMEFRAMES"], "max_hold_min": v["MAX_HOLD_MINUTES"]}
+                               for k, v in config.TIMEFRAME_PROFILES.items()},
+        "funding_pct_8h": config.FUNDING_PCT_PER_8H,
         "test_min_sl_pct": config.TEST_MIN_SL_PCT,
         "test_min_sl_atr": config.TEST_MIN_SL_ATR_MULT,
         "confirm_lookback_bars": config.CONFIRM_LOOKBACK_BARS,
@@ -491,8 +539,8 @@ def api_data():
         "closed_page_size": closed_page_size,
         "equity_curve": [{"time": t, "balance": b} for t, b in equity_curve],
         "last_update": last_update_time["value"],
-        "timeframe": config.TIMEFRAME,
-        "symbol_count": len(active_symbols["list"]),
+        "symbol_count": min(len(active_symbols["list"]),
+                            config.TIMEFRAME_PROFILES[settings["timeframe"]]["SCAN_SYMBOLS"]),
         "symbols_scanned": len(symbols_view),
     })
 
@@ -556,6 +604,18 @@ def api_control():
         paper_trader.set_setting(conn, "active_strategies", json.dumps(chosen))
         log.info(f"[کنترل پنل] استراتژی‌های فعال: {chosen}")
 
+    if "timeframe" in body:
+        if body["timeframe"] in config.TIMEFRAME_PROFILES:
+            paper_trader.set_setting(conn, "timeframe", body["timeframe"])
+            log.info(f"[کنترل پنل] تایم‌فریم/پروفایل: {body['timeframe']}")
+        else:
+            return jsonify({"ok": False, "error": "تایم‌فریم نامعتبر است"}), 400
+    if "entry_mode" in body:
+        if body["entry_mode"] in ("limit", "market"):
+            paper_trader.set_setting(conn, "entry_mode", body["entry_mode"])
+        else:
+            return jsonify({"ok": False, "error": "مدل ورود نامعتبر است"}), 400
+
     for key, setting in (("min_sl", "min_sl"), ("room", "room_to_target"),
                          ("btc_filter", "btc_filter"), ("long_only", "long_only")):
         if key in body:
@@ -606,7 +666,8 @@ def api_close_trade():
     if not trade_id:
         return jsonify({"ok": False, "error": "شناسه معامله مشخص نشده"}), 400
 
-    row = conn.execute("SELECT symbol FROM trades WHERE id=? AND status='OPEN'", (trade_id,)).fetchone()
+    row = conn.execute("SELECT symbol FROM trades WHERE id=? AND status IN ('OPEN','PENDING')",
+                       (trade_id,)).fetchone()
     if not row:
         return jsonify({"ok": False, "error": "پوزیشن باز پیدا نشد"}), 404
     symbol = row[0]
@@ -673,15 +734,17 @@ def _remember_backtest_conn(job_id, conn_bt):
         del backtest_connections[oldest_id]
 
 
-def _run_backtest_job(job_id, symbols, days, overrides):
+def _run_backtest_job(job_id, symbols, days, overrides, timeframe=None):
     def progress_cb(msg):
         backtest_jobs[job_id]["progress"] = msg
 
     try:
         backtest_jobs[job_id]["state"] = "running"
-        conn_bt, meta = backtest.run_backtest(symbols, days, config, overrides, progress_cb)
-        cfg_bt = backtest.build_config(config, overrides)
+        conn_bt, meta = backtest.run_backtest(symbols, days, config, overrides, progress_cb, timeframe=timeframe)
+        cfg_bt = meta.pop("_cfg", None) or backtest.build_config(config, overrides)
         report = backtest_analyzer.analyze(conn_bt, cfg_bt, meta)
+        report["timeframe"] = meta.get("timeframe")
+        report["days"] = meta.get("days")
         report["segments"] = meta.get("segments")
         report["engine"] = meta.get("engine")
         backtest_jobs[job_id]["result"] = report
@@ -707,7 +770,7 @@ def api_backtest_start():
     symbols = body.get("symbols")
     if not symbols:
         top_n = int(body.get("top_n", 15))
-        top_n = max(1, min(top_n, 60))
+        top_n = max(1, min(top_n, 250))
         symbols = active_symbols["list"][:top_n] if active_symbols["list"] else list(config.SYMBOLS)[:top_n]
 
     overrides = body.get("overrides") or {}
@@ -720,7 +783,7 @@ def api_backtest_start():
         "ACTIVE_STRATEGIES", "STRATEGY_COMBINE_MODE",
         "BREAKOUT_LOOKBACK", "BREAKOUT_VOLUME_MULT",
         "MIN_SL_PCT", "MIN_SL_ATR_MULT", "REQUIRE_ROOM_TO_TARGET", "BTC_REGIME_FILTER",
-        "ALLOW_LONG", "ALLOW_SHORT", "CONFIRM_LOOKBACK_BARS", "SHORT_EXTRA_HTF_AGREEMENT",
+        "ALLOW_LONG", "ALLOW_SHORT", "CONFIRM_LOOKBACK_BARS", "SHORT_EXTRA_HTF_AGREEMENT", "ENTRY_MODE",
     }
     overrides = {k: v for k, v in overrides.items() if k in allowed_override_keys}
 
@@ -741,6 +804,8 @@ def api_backtest_start():
         overrides["BTC_REGIME_FILTER"] = bool(body["btc_filter"])
     if body.get("long_only"):
         overrides["ALLOW_SHORT"] = False
+    if body.get("entry_mode") in ("limit", "market"):
+        overrides["ENTRY_MODE"] = body["entry_mode"]
 
     if compare_running():
         return jsonify({"ok": False, "error": "الان «مقایسه‌ی استراتژی‌ها» در حال اجراست؛ بعد از تمام شدنش امتحان کن."}), 409
@@ -755,7 +820,9 @@ def api_backtest_start():
         "started_at": datetime.utcnow().isoformat(),
         "params": {"days": days, "symbols": symbols, "overrides": overrides},
     }
-    t = threading.Thread(target=_run_backtest_job, args=(job_id, symbols, days, overrides), daemon=True)
+    timeframe = body.get("timeframe") if body.get("timeframe") in config.TIMEFRAME_PROFILES else None
+    backtest_jobs[job_id]["params"]["timeframe"] = timeframe
+    t = threading.Thread(target=_run_backtest_job, args=(job_id, symbols, days, overrides, timeframe), daemon=True)
     t.start()
     return jsonify({"ok": True, "job_id": job_id})
 
@@ -857,6 +924,9 @@ def api_compare_start():
     days = max(60, min(int(body.get("days", 365)), 1095))
     top_n = max(3, min(int(body.get("top_n", 20)), 60))
     grid = "full" if body.get("grid") == "full" else "quick"
+    tfs = [t for t in (body.get("timeframes") or ["15m", "1h", "4h"]) if t in config.TIMEFRAME_PROFILES]
+    if not tfs:
+        return jsonify({"ok": False, "error": "حداقل یک تایم‌فریم انتخاب کن"}), 400
     with compare_lock:
         if compare_running():
             return jsonify({"ok": False, "error": "یک مقایسه‌ی دیگه در حال اجراست.",
@@ -867,14 +937,15 @@ def api_compare_start():
         job_id = uuid.uuid4().hex[:10]
         baseline_path = os.path.join(_reports_dir(), f"baseline_{job_id}.json")
         live_conf = live_config_snapshot()
-        default_conf = {"active_strategies": list(config.ACTIVE_STRATEGIES), "combine_mode": config.STRATEGY_COMBINE_MODE,
+        default_conf = {"timeframe": "15m", "active_strategies": list(config.ACTIVE_STRATEGIES),
+                        "combine_mode": config.STRATEGY_COMBINE_MODE,
                         "strictness": config.DEFAULT_STRICTNESS, "trailing": bool(config.USE_TRAILING_SL),
                         "min_sl": False, "room": False, "btc_filter": False, "long_only": False}
         with open(baseline_path, "w", encoding="utf-8") as f:
             json.dump([{"name": "تنظیمات فعلی ربات زنده", "config": live_conf},
                        {"name": "تنظیمات پیش‌فرض", "config": default_conf}], f, ensure_ascii=False)
         cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "compare.py"),
-               "--days", str(days), "--grid", grid, "--job-id", job_id,
+               "--days", str(days), "--grid", grid, "--job-id", job_id, "--timeframes", ",".join(tfs),
                "--progress-file", _progress_path(job_id), "--baseline-file", baseline_path,
                "--symbols", ",".join(symbols)]
         if os.environ.get("TRADINGBOT_OFFLINE") == "1":
@@ -890,7 +961,7 @@ def api_compare_start():
         compare_proc["proc"] = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT,
                                                 preexec_fn=lower_priority, close_fds=True)
         compare_proc["job_id"] = job_id
-    log.info(f"[مقایسه‌ی استراتژی‌ها] شروع شد: {job_id} ({days} روز، {len(symbols)} نماد، {grid})")
+    log.info(f"[مقایسه‌ی استراتژی‌ها] شروع شد: {job_id} ({days} روز، {len(symbols)} نماد، {grid}، {tfs})")
     return jsonify({"ok": True, "job_id": job_id})
 
 
@@ -940,6 +1011,7 @@ def api_compare_list():
             items.append({"job_id": m.get("job_id") or name[8:-5], "created_at": m.get("created_at"),
                           "days": m.get("days"), "symbols": len(m.get("symbols", [])),
                           "grid": m.get("grid"), "n_configs": m.get("n_configs"),
+                          "timeframes": list((m.get("timeframes") or {}).keys()),
                           "status": rec.get("status"),
                           "best": (rec.get("best") or {}).get("label")})
         except Exception:
@@ -966,8 +1038,67 @@ def api_compare_apply():
     paper_trader.set_setting(conn, "room_to_target", "1" if c.get("room") else "0")
     paper_trader.set_setting(conn, "btc_filter", "1" if c.get("btc_filter") else "0")
     paper_trader.set_setting(conn, "long_only", "1" if c.get("long_only") else "0")
+    if c.get("timeframe") in config.TIMEFRAME_PROFILES:
+        paper_trader.set_setting(conn, "timeframe", c["timeframe"])
     log.info(f"[اعمال از مقایسه] تنظیمات جدید ربات زنده: {c}")
     return jsonify({"ok": True, "settings": get_bot_settings()})
+
+
+def _zip_response(files, name):
+    """ساخت یک فایل zip در حافظه از (نام داخل zip، محتوا یا مسیر فایل)."""
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for arcname, content in files:
+            if isinstance(content, str) and os.path.exists(content):
+                z.write(content, arcname)
+            elif content is not None:
+                z.writestr(arcname, content)
+    buf.seek(0)
+    return send_file(buf, as_attachment=True, download_name=name, mimetype="application/zip")
+
+
+@app.route("/api/compare/download/<job_id>")
+def api_compare_download(job_id):
+    """همه‌ی خروجی‌های یک مقایسه در یک فایل: گزارش کامل، جدول همه‌ی تنظیم‌ها (CSV)، خلاصه‌ی متنی."""
+    job_id = _safe_job_id(job_id)
+    d = _reports_dir()
+    rep_path = _report_path(job_id)
+    if not os.path.exists(rep_path):
+        return jsonify({"ok": False, "error": "گزارش پیدا نشد"}), 404
+    files = [("report.json", rep_path),
+             ("all_results.csv", os.path.join(d, f"results_{job_id}.csv")),
+             ("summary.txt", os.path.join(d, f"summary_{job_id}.txt")),
+             ("config.py", "config.py")]
+    return _zip_response(files, f"compare_{job_id}.zip")
+
+
+def _rows_to_csv(conn_bt, query, cols=None):
+    import csv
+    cur = conn_bt.execute(query)
+    names = cols or [c[0] for c in cur.description]
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(names)
+    w.writerows(cur.fetchall())
+    return "\ufeff" + out.getvalue()
+
+
+@app.route("/api/backtest/download/<job_id>")
+def api_backtest_download(job_id):
+    """خروجی کامل یک بک‌تست: گزارش تحلیل، همه‌ی معاملات، همه‌ی سیگنال‌ها (با دلیل رد)، منحنی موجودی."""
+    job = backtest_jobs.get(job_id)
+    conn_bt = backtest_connections.get(job_id)
+    if not job or job.get("state") != "done" or conn_bt is None:
+        return jsonify({"ok": False, "error": "نتیجه‌ی این بک‌تست دیگه در دسترس نیست"}), 404
+    files = [
+        ("report.json", json.dumps({"params": job["params"], "result": job["result"]}, ensure_ascii=False, indent=1)),
+        ("trades.csv", _rows_to_csv(conn_bt, "SELECT * FROM trades ORDER BY open_time")),
+        ("signals.csv", _rows_to_csv(conn_bt, "SELECT * FROM signal_log ORDER BY time")),
+        ("equity.csv", _rows_to_csv(conn_bt, "SELECT time, balance FROM equity ORDER BY id")),
+        ("config.py", "config.py"),
+    ]
+    return _zip_response(files, f"backtest_{job_id}.zip")
 
 
 @app.route("/api/data_cache")
