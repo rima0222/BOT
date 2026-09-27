@@ -127,6 +127,12 @@
   .issue-item.info{background:rgba(88,166,255,.1); border:1px solid rgba(88,166,255,.3);}
   .issue-item .sug{color:var(--muted); margin-top:4px;}
   .link-btn{background:none; border:none; color:var(--blue); cursor:pointer; font-size:11px; text-decoration:underline; padding:0;}
+  .pager{display:flex; align-items:center; justify-content:center; gap:10px; margin-top:10px; font-size:12px; color:var(--muted);}
+  .pager button{
+    background:#0a0e14; border:1px solid var(--border); color:var(--text);
+    border-radius:6px; padding:5px 12px; font-size:12px; cursor:pointer;
+  }
+  .pager button:disabled{opacity:.4; cursor:not-allowed;}
   @media(max-width:1100px){ .grid{grid-template-columns:repeat(3,1fr);} .cols2{grid-template-columns:1fr;} }
   @media(max-width:640px){ .grid{grid-template-columns:repeat(2,1fr);} .top-right{gap:10px;} .meter{min-width:70px;} .meter-bar{width:60px;} }
 </style>
@@ -213,8 +219,11 @@
         <span class="hint">سقف پوزیشن هم‌زمان: <b id="maxPos">—</b></span>
         <span class="hint">سقف لوریج: <b id="maxLev">—</b></span>
         <span class="hint">سقف سهم هر پوزیشن از سرمایه: <b id="maxPosPct">—</b></span>
-        <span class="hint">تایید چند-تایم‌فریمی: <b id="htfStatus">—</b> (حداقل <b id="htfMinAgree">—</b> از ۵)</span>
+        <span class="hint">تایید چند-تایم‌فریمی: <b id="htfStatus">—</b> (LONG حداقل <b id="htfMinAgree">—</b>، SHORT حداقل <b id="htfMinAgreeShort">—</b> از ۵)</span>
         <div class="htf-tags" id="htfTags"></div>
+      </div>
+      <div class="controls-row" style="font-size:11px; color:var(--muted);">
+        🚫 هیچ‌وقت معامله نمی‌کنه روی: <span id="excludedTokens"></span>
       </div>
       <div class="controls-row" style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border);">
         <label class="switch-label">
@@ -296,12 +305,16 @@
         </table>
       </div>
       <div class="empty" id="closedEmpty" style="display:none;">هنوز معامله‌ای بسته نشده</div>
+      <div class="pager" id="closedPager"></div>
     </div>
 
     <div class="panel">
       <div class="panel-head">
         <h2>لاگ سیگنال‌ها (چرا صادر شد، چرا اجرا نشد)</h2>
         <span class="hint">شامل سیگنال‌هایی هم می‌شه که رد شدن — برای فهمیدن این‌که فیلترها چقدر سخت‌گیرن</span>
+      </div>
+      <div class="controls-row" style="margin-bottom:8px;">
+        <label class="switch-label"><input type="checkbox" id="signalLogOnlyRejected"> فقط رد‌شده‌ها</label>
       </div>
       <div class="scrollbox">
         <table id="signalLogTable">
@@ -313,6 +326,7 @@
         </table>
       </div>
       <div class="empty" id="signalLogEmpty" style="display:none;">هنوز سیگنالی ثبت نشده</div>
+      <div class="pager" id="signalLogPager"></div>
     </div>
 
     <!-- ==================== بک‌تست ==================== -->
@@ -395,6 +409,36 @@
           <div class="panel-head"><h2>منحنی موجودی بک‌تست</h2></div>
           <div class="hint" style="margin-bottom:8px;">نمودار بر اساس آمار برگردانده‌شده از سرور (بدون درخواست اضافه)</div>
           <div id="btMonthTable"></div>
+        </div>
+
+        <div class="panel" style="background:#0a0e14;">
+          <div class="panel-head"><h2>لیست کامل معاملات این بک‌تست</h2></div>
+          <div class="scrollbox" style="max-height:340px;">
+            <table id="btTradesTable">
+              <thead><tr>
+                <th>نماد</th><th>جهت</th><th>استراتژی</th><th>ورود</th><th>خروج</th>
+                <th>نوع خروج</th><th>سود/زیان</th><th>نتیجه</th><th>زمان بسته‌شدن</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="pager" id="btTradesPager"></div>
+        </div>
+
+        <div class="panel" style="background:#0a0e14;">
+          <div class="panel-head">
+            <h2>سیگنال‌های رد‌شده‌ی این بک‌تست</h2>
+            <span class="hint">می‌بینی چند تا سیگنال کاندید بوده ولی چرا هیچ‌وقت پوزیشن باز نشده</span>
+          </div>
+          <div class="scrollbox" style="max-height:340px;">
+            <table id="btSignalsTable">
+              <thead><tr>
+                <th>زمان</th><th>نماد</th><th>جهت</th><th>استراتژی</th><th>R:R</th><th>تایید HTF</th><th>دلیل رد شدن</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="pager" id="btSignalsPager"></div>
         </div>
       </div>
     </div>
@@ -569,9 +613,25 @@ function renderSymbolsTable(){
 }
 document.getElementById('symbolFilter').addEventListener('input', renderSymbolsTable);
 
+let closedPage = 1;
+const closedPageSize = 15;
+let signalLogPage = 1;
+const signalLogPageSize = 20;
+
+function renderPager(containerId, page, pageSize, total, onChange){
+  const container = document.getElementById(containerId);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  container.innerHTML = `
+    <button ${page<=1?'disabled':''} data-dir="prev">◀ قبلی</button>
+    <span dir="ltr">${page} / ${totalPages} (${total} مورد)</span>
+    <button ${page>=totalPages?'disabled':''} data-dir="next">بعدی ▶</button>`;
+  container.querySelector('[data-dir="prev"]').addEventListener('click', () => onChange(page-1));
+  container.querySelector('[data-dir="next"]').addEventListener('click', () => onChange(page+1));
+}
+
 async function refresh(){
   try{
-    const res = await fetch('/api/data');
+    const res = await fetch(`/api/data?closed_page=${closedPage}&closed_page_size=${closedPageSize}`);
     const data = await res.json();
 
     document.getElementById('serverInfo').innerText =
@@ -608,6 +668,9 @@ async function refresh(){
     document.getElementById('maxPosPct').innerText = data.max_position_pct + '%';
     document.getElementById('htfStatus').innerText = data.htf_enabled ? 'فعال' : 'غیرفعال';
     document.getElementById('htfMinAgree').innerText = data.htf_min_agreement;
+    document.getElementById('htfMinAgreeShort').innerText = Math.min(5, data.htf_min_agreement + data.short_extra_htf_agreement);
+    document.getElementById('excludedTokens').innerText =
+      [...data.excluded_gold_tokens, ...data.excluded_stablecoin_bases].join('، ');
     document.getElementById('htfTags').innerHTML = data.htf_enabled
       ? data.htf_timeframes.map(tf => `<span class="htf-tag">${tf}</span>`).join('') : '';
 
@@ -688,6 +751,10 @@ async function refresh(){
         <td><button class="link-btn" onclick="showPriceHistory(${t.id})">نمودار</button></td>
       </tr>`).join('');
 
+    renderPager('closedPager', data.closed_page, data.closed_page_size, data.closed_trades_total, (p) => {
+      closedPage = p; refresh();
+    });
+
     const labels = data.equity_curve.map(p => new Date(p.time+'Z').toLocaleTimeString('fa-IR'));
     const values = data.equity_curve.map(p => p.balance);
     const ctx = document.getElementById('equityChart');
@@ -709,7 +776,8 @@ async function refresh(){
 
 async function refreshSignalLog(){
   try{
-    const res = await fetch('/api/signal_log?limit=60');
+    const onlyRejected = document.getElementById('signalLogOnlyRejected').checked;
+    const res = await fetch(`/api/signal_log?page=${signalLogPage}&page_size=${signalLogPageSize}&only_rejected=${onlyRejected}`);
     const data = await res.json();
     const body = document.querySelector('#signalLogTable tbody');
     document.getElementById('signalLogEmpty').style.display = data.signals.length ? 'none' : 'block';
@@ -724,8 +792,14 @@ async function refreshSignalLog(){
           ? '<span class="badge opened">اجرا شد</span>'
           : `<span class="badge rejected">رد شد (${s.rejection_reason || '—'})</span>`}</td>
       </tr>`).join('');
+    renderPager('signalLogPager', data.page, data.page_size, data.total, (p) => {
+      signalLogPage = p; refreshSignalLog();
+    });
   }catch(e){ console.error('خطا در دریافت لاگ سیگنال:', e); }
 }
+document.getElementById('signalLogOnlyRejected').addEventListener('change', () => {
+  signalLogPage = 1; refreshSignalLog();
+});
 
 // ==================== مودال تاریخچه قیمت پوزیشن ====================
 let priceHistoryChart = null;
@@ -800,7 +874,14 @@ document.getElementById('btStartBtn').addEventListener('click', async () => {
   pollBacktest(data.job_id);
 });
 
+let currentBacktestJobId = null;
+let btTradesPage = 1;
+let btSignalsPage = 1;
+
 function pollBacktest(jobId){
+  currentBacktestJobId = jobId;
+  btTradesPage = 1;
+  btSignalsPage = 1;
   if(btPollTimer) clearInterval(btPollTimer);
   btPollTimer = setInterval(async () => {
     try{
@@ -877,6 +958,50 @@ function renderBacktestResult(r){
   document.getElementById('btMonthTable').innerHTML = '<table><thead><tr><th>ماه</th><th>معاملات</th><th>وین‌ریت</th><th>سود/زیان</th></tr></thead><tbody>' +
     r.by_month.map(m => `<tr><td dir="ltr">${m.month}</td><td>${m.trades}</td><td>${m.win_rate}%</td>
     <td class="${m.pnl>=0?'green':'red'}">${m.pnl>=0?'+':''}${m.pnl}</td></tr>`).join('') + '</tbody></table>';
+
+  loadBacktestTrades(1);
+  loadBacktestSignals(1);
+}
+
+async function loadBacktestTrades(page){
+  if(!currentBacktestJobId) return;
+  btTradesPage = page;
+  try{
+    const res = await fetch(`/api/backtest/trades/${currentBacktestJobId}?page=${page}&page_size=20`);
+    const data = await res.json();
+    if(!data.ok) return;
+    document.querySelector('#btTradesTable tbody').innerHTML = data.trades.map(t => `
+      <tr>
+        <td>${t.symbol}</td><td>${sideBadge(t.side)}</td>
+        <td style="font-size:11px; color:var(--muted);">${t.strategy_name || '—'}</td>
+        <td>${fmt(t.entry)}</td><td>${fmt(t.close_price)}</td>
+        <td>${exitTypeBadge(t.exit_type)}</td>
+        <td class="${t.pnl>=0?'green':'red'}">${t.pnl>=0?'+':''}${fmt(t.pnl,2)}</td>
+        <td><span class="badge ${t.result==='WIN'?'win':'loss'}">${t.result==='WIN'?'برد':'باخت'}</span></td>
+        <td>${t.close_time ? new Date(t.close_time+'Z').toLocaleString('fa-IR') : '—'}</td>
+      </tr>`).join('') || '<tr><td colspan="9" style="text-align:center; color:var(--muted);">معامله‌ای نیست</td></tr>';
+    renderPager('btTradesPager', data.page, data.page_size, data.total, loadBacktestTrades);
+  }catch(e){ console.error(e); }
+}
+
+async function loadBacktestSignals(page){
+  if(!currentBacktestJobId) return;
+  btSignalsPage = page;
+  try{
+    const res = await fetch(`/api/backtest/signals/${currentBacktestJobId}?page=${page}&page_size=20&only_rejected=true`);
+    const data = await res.json();
+    if(!data.ok) return;
+    document.querySelector('#btSignalsTable tbody').innerHTML = data.signals.map(s => `
+      <tr>
+        <td>${s.time ? new Date(s.time+'Z').toLocaleString('fa-IR') : '—'}</td>
+        <td>${s.symbol}</td><td>${sideBadge(s.side)}</td>
+        <td style="font-size:11px; color:var(--muted);">${s.strategy_name || '—'}</td>
+        <td>${s.rr ? s.rr.toFixed(2) : '—'}</td>
+        <td dir="ltr">${s.htf_agree !== null && s.htf_agree !== undefined ? s.htf_agree + '/5' : '—'}</td>
+        <td><span class="badge rejected">${s.rejection_reason || '—'}</span></td>
+      </tr>`).join('') || '<tr><td colspan="7" style="text-align:center; color:var(--muted);">سیگنال رد‌شده‌ای نیست</td></tr>';
+    renderPager('btSignalsPager', data.page, data.page_size, data.total, loadBacktestSignals);
+  }catch(e){ console.error(e); }
 }
 
 initBacktestControls();
