@@ -103,16 +103,13 @@ def get_bot_settings():
     trailing_enabled = paper_trader.get_setting(conn, "trailing_enabled",
                                                  "1" if config.USE_TRAILING_SL else "0") == "1"
 
-    active_strategies_raw = paper_trader.get_setting(conn, "active_strategies", None)
-    if active_strategies_raw:
-        try:
-            active_strategies = json.loads(active_strategies_raw)
-        except Exception:
-            active_strategies = list(config.ACTIVE_STRATEGIES)
-    else:
-        active_strategies = list(config.ACTIVE_STRATEGIES)
-
-    combine_mode = paper_trader.get_setting(conn, "strategy_combine_mode", config.STRATEGY_COMBINE_MODE)
+    # فقط یک استراتژی: ترکیبی وزن‌دار
+    active_strategies = ["weighted_confluence"]
+    combine_mode = "any"
+    try:
+        min_score = float(paper_trader.get_setting(conn, "min_score", config.WC_MIN_SCORE_PCT))
+    except (TypeError, ValueError):
+        min_score = float(config.WC_MIN_SCORE_PCT)
 
     def flag(key, default):
         return paper_trader.get_setting(conn, key, "1" if default else "0") == "1"
@@ -146,6 +143,7 @@ def get_bot_settings():
         "timeframe": timeframe,
         "entry_mode": entry_mode,
         "htf": htf,
+        "min_score": min_score,
     }
 
 
@@ -153,7 +151,7 @@ def live_config_snapshot(settings=None):
     """تنظیمات فعلی ربات زنده به همون فرمتی که «مقایسه‌ی استراتژی‌ها» می‌فهمه."""
     st = settings or get_bot_settings()
     return {"timeframe": st["timeframe"], "active_strategies": st["active_strategies"],
-            "combine_mode": st["combine_mode"],
+            "combine_mode": st["combine_mode"], "min_score": st["min_score"],
             "strictness": st["strictness"], "trailing": st["trailing_enabled"], "min_sl": st["min_sl"],
             "room": st["room"], "btc_filter": st["btc_filter"], "long_only": st["long_only"], "htf": st["htf"]}
 
@@ -197,6 +195,7 @@ def get_effective_cfg(settings):
         "MIN_RISK_REWARD": settings["min_rr"],
         "ACTIVE_STRATEGIES": settings["active_strategies"],
         "STRATEGY_COMBINE_MODE": settings["combine_mode"],
+        "WC_MIN_SCORE_PCT": settings["min_score"],
         "MIN_SL_PCT": config.TEST_MIN_SL_PCT if settings["min_sl"] else 0.0,
         "MIN_SL_ATR_MULT": config.TEST_MIN_SL_ATR_MULT if settings["min_sl"] else 0.0,
         "REQUIRE_ROOM_TO_TARGET": settings["room"],
@@ -279,9 +278,13 @@ def scan_symbol(symbol, settings):
     sig = result["signal"]
     strategy_name = sig.get("strategy", "unknown")
 
+    score = sig.get("score")
+    reasons = "، ".join(strategies.COMPONENT_LABELS.get(r, r) for r in sig.get("reasons", []))
+
     def reject(reason, htf_agree=None):
         paper_trader.log_signal(conn, symbol, sig["side"], strategy_name, sig["entry"], sig["sl"],
-                                 sig["tp"], sig["rr"], htf_agree, opened=False, rejection_reason=reason)
+                                 sig["tp"], sig["rr"], htf_agree, opened=False, rejection_reason=reason,
+                                 score=score, reasons=reasons)
 
     if not settings["running"]:
         return  # وقتی متوقفه، حتی سیگنال رد‌شده رو لاگ نمی‌کنیم (فقط پایشه، تصمیمی نمی‌گیره)
@@ -342,18 +345,19 @@ def scan_symbol(symbol, settings):
         position_pct_cap=config.MAX_POSITION_PCT_OF_CAPITAL,
         trailing_enabled=settings["trailing_enabled"], strategy_name=strategy_name,
         pending=not entry_taker, expire_ts=candle_close_ms + cfg.LIMIT_WAIT_BARS * tf_ms,
-        entry_taker=entry_taker, max_hold_min=cfg.MAX_HOLD_MINUTES, timeframe=cfg.TIMEFRAME,
+        entry_taker=entry_taker, max_hold_min=cfg.MAX_HOLD_MINUTES, timeframe=cfg.TIMEFRAME, score=score,
     )
 
     paper_trader.log_signal(conn, symbol, sig["side"], strategy_name, sig["entry"], sig["sl"], sig["tp"],
                              sig["rr"], htf_agree, opened=trade_res["opened"],
-                             rejection_reason=None if trade_res["opened"] else trade_res["reason"])
+                             rejection_reason=None if trade_res["opened"] else trade_res["reason"],
+                             score=score, reasons=reasons)
 
     if trade_res["opened"]:
         cap_note = " (حجم به‌خاطر سقف تنوع/سرمایه‌ی آزاد کوچک‌تر شد)" if trade_res.get("capped") else ""
         trail_note = " | تریلینگ: روشن" if settings["trailing_enabled"] else ""
         log.info(
-            f"[سیگنال جدید ✅] {symbol} {sig['side']} استراتژی={strategy_name} ورود={sig['entry']:.4f} "
+            f"[سیگنال جدید ✅] {symbol} {sig['side']} امتیاز={score} ({reasons}) ورود={sig['entry']:.4f} "
             f"حدضرر={sig['sl']:.4f} حدسود={sig['tp']:.4f} R:R={sig['rr']:.2f} "
             f"ریسک={settings['risk_pct']}% لوریج={trade_res['leverage']}x "
             f"مارجین=${trade_res['margin']:.2f} ارزش‌پوزیشن=${trade_res['notional']:.2f}{cap_note}{trail_note} | HTF: {htf_detail}"
@@ -450,7 +454,7 @@ def index():
 @app.route("/api/data")
 def api_data():
     settings = get_bot_settings()
-    stats = paper_trader.get_stats(conn)
+    stats = paper_trader.get_stats(conn, settings["initial_capital"])
     balance = round(paper_trader.get_balance(conn, settings["initial_capital"]), 2)
     locked_capital = round(paper_trader.get_locked_capital(conn), 2)
     available_capital = round(balance - locked_capital, 2)
@@ -480,6 +484,8 @@ def api_data():
             "support": a.get("support"),
             "resistance": a.get("resistance"),
             "signal": a.get("signal"),
+            "score_long": a.get("score_long"),
+            "score_short": a.get("score_short"),
         })
 
     system_stats = {
@@ -519,6 +525,10 @@ def api_data():
         "trailing_beyond_r": config.TRAILING_SL_BEYOND_DISTANCE_R,
         "active_strategies": settings["active_strategies"],
         "combine_mode": settings["combine_mode"],
+        "min_score": settings["min_score"],
+        "score_choices": config.WC_SCORE_CHOICES,
+        "weights": config.WC_WEIGHTS,
+        "component_labels": strategies.COMPONENT_LABELS,
         "min_sl": settings["min_sl"],
         "room": settings["room"],
         "btc_filter": settings["btc_filter"],
@@ -601,12 +611,15 @@ def api_control():
         log.info(f"[کنترل پنل] تریلینگ استاپ: {'روشن' if body['trailing_enabled'] else 'خاموش'} "
                  f"(فقط روی پوزیشن‌های جدید اثر داره)")
 
-    if "active_strategies" in body:
-        chosen = [s for s in body["active_strategies"] if s in strategies.STRATEGY_REGISTRY]
-        if not chosen:
-            return jsonify({"ok": False, "error": "حداقل یک استراتژی باید فعال باشه"}), 400
-        paper_trader.set_setting(conn, "active_strategies", json.dumps(chosen))
-        log.info(f"[کنترل پنل] استراتژی‌های فعال: {chosen}")
+    if "min_score" in body:
+        try:
+            ms = float(body["min_score"])
+            if not 0 < ms <= 100:
+                raise ValueError
+            paper_trader.set_setting(conn, "min_score", ms)
+            log.info(f"[کنترل پنل] حداقل امتیاز ورود: {ms:g}")
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "امتیاز نامعتبر است"}), 400
 
     if "timeframe" in body:
         if body["timeframe"] in config.TIMEFRAME_PROFILES:
@@ -625,13 +638,6 @@ def api_control():
         if key in body:
             paper_trader.set_setting(conn, setting, "1" if body[key] else "0")
             log.info(f"[کنترل پنل] {key}: {'روشن' if body[key] else 'خاموش'}")
-
-    if "combine_mode" in body:
-        if body["combine_mode"] in ("any", "all", "confirm"):
-            paper_trader.set_setting(conn, "strategy_combine_mode", body["combine_mode"])
-            log.info(f"[کنترل پنل] حالت ترکیب استراتژی‌ها: {body['combine_mode']}")
-        else:
-            return jsonify({"ok": False, "error": "حالت ترکیب نامعتبر است"}), 400
 
     return jsonify({"ok": True, "settings": get_bot_settings()})
 
@@ -788,6 +794,7 @@ def api_backtest_start():
         "BREAKOUT_LOOKBACK", "BREAKOUT_VOLUME_MULT",
         "MIN_SL_PCT", "MIN_SL_ATR_MULT", "REQUIRE_ROOM_TO_TARGET", "BTC_REGIME_FILTER",
         "ALLOW_LONG", "ALLOW_SHORT", "CONFIRM_LOOKBACK_BARS", "SHORT_EXTRA_HTF_AGREEMENT", "ENTRY_MODE",
+        "WC_MIN_SCORE_PCT",
     }
     overrides = {k: v for k, v in overrides.items() if k in allowed_override_keys}
 
@@ -812,6 +819,10 @@ def api_backtest_start():
         overrides["ENTRY_MODE"] = body["entry_mode"]
     if "htf" in body:
         overrides["USE_HTF_CONFIRMATION"] = bool(body["htf"])
+    if body.get("min_score") is not None:
+        overrides["WC_MIN_SCORE_PCT"] = float(body["min_score"])
+    overrides["ACTIVE_STRATEGIES"] = ["weighted_confluence"]
+    overrides["STRATEGY_COMBINE_MODE"] = "any"
 
     if compare_running():
         return jsonify({"ok": False, "error": "الان «مقایسه‌ی استراتژی‌ها» در حال اجراست؛ بعد از تمام شدنش امتحان کن."}), 409
@@ -944,7 +955,7 @@ def api_compare_start():
         baseline_path = os.path.join(_reports_dir(), f"baseline_{job_id}.json")
         live_conf = live_config_snapshot()
         default_conf = {"timeframe": "15m", "active_strategies": list(config.ACTIVE_STRATEGIES),
-                        "combine_mode": config.STRATEGY_COMBINE_MODE,
+                        "combine_mode": "any", "min_score": float(config.WC_MIN_SCORE_PCT),
                         "strictness": config.DEFAULT_STRICTNESS, "trailing": bool(config.USE_TRAILING_SL),
                         "min_sl": False, "room": False, "btc_filter": False, "long_only": False,
                         "htf": bool(config.USE_HTF_CONFIRMATION)}
@@ -1130,13 +1141,11 @@ def api_compare_apply():
     """اعمال یک تنظیم از نتایج مقایسه روی ربات زنده (فقط روی سیگنال‌ها و پوزیشن‌های بعدی اثر داره)."""
     body = request.get_json(force=True, silent=True) or {}
     c = body.get("config") or {}
-    active = [s for s in c.get("active_strategies", []) if s in strategies.STRATEGY_REGISTRY]
-    if not active or c.get("combine_mode") not in ("any", "all", "confirm") \
-            or c.get("strictness") not in config.STRICTNESS_PRESETS:
+    if c.get("strictness") not in config.STRICTNESS_PRESETS:
         return jsonify({"ok": False, "error": "تنظیم نامعتبر"}), 400
-    paper_trader.set_setting(conn, "active_strategies", json.dumps(active))
-    paper_trader.set_setting(conn, "strategy_combine_mode", c["combine_mode"])
     paper_trader.set_setting(conn, "strictness", c["strictness"])
+    if c.get("min_score") is not None:
+        paper_trader.set_setting(conn, "min_score", float(c["min_score"]))
     paper_trader.set_setting(conn, "trailing_enabled", "1" if c.get("trailing") else "0")
     paper_trader.set_setting(conn, "min_sl", "1" if c.get("min_sl") else "0")
     paper_trader.set_setting(conn, "room_to_target", "1" if c.get("room") else "0")

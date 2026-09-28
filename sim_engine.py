@@ -102,14 +102,18 @@ class PathSim:
                 SLprev[0] = cur_sl
                 SLprev[1:] = SLk[:-1]
                 c1 = ll <= SLprev
+                tph = hh >= TP          # حد سود R:R با تریلینگ هم فعاله
                 c2 = (SLk > SLprev) & (cc <= SLk)
-                hitm = c1 | c2
+                hitm = c1 | tph | c2
                 if hitm.any():
                     i = int(np.argmax(hitm))
                     if c1[i]:
                         lvl = SLprev[i]
                         price = oo[i] if oo[i] < lvl else lvl
                         return (k + i, sgn * price, "STOP", sgn * lvl, sgn * (P[i - 1] if i > 0 else peak))
+                    if tph[i]:
+                        price = oo[i] if oo[i] > TP else TP
+                        return (k + i, sgn * price, "TP", sgn * TP, sgn * P[i])
                     return (k + i, sgn * SLk[i], "STOP", sgn * SLk[i], sgn * P[i])
                 peak, cur_sl = P[-1], SLk[-1]
             k = k1
@@ -180,7 +184,7 @@ def merge_candidates(per_symbol, preps, symbol_order):
     ترتیب اسکن ربات زنده). per_symbol: dict symbol -> خروجی signals_engine.combine
     """
     cols = {k: [] for k in ("time", "rank", "sym", "idx", "side", "sl", "tp", "rr", "entry",
-                            "htf_l", "htf_s", "btc")}
+                            "htf_l", "htf_s", "btc", "score")}
     labels = []
     for rank, sym in enumerate(symbol_order):
         cand = per_symbol.get(sym)
@@ -200,6 +204,7 @@ def merge_candidates(per_symbol, preps, symbol_order):
         cols["htf_l"].append(p.htf_long[idx])
         cols["htf_s"].append(p.htf_short[idx])
         cols["btc"].append(p.btc_trend[idx])
+        cols["score"].append(cand.get("score", np.zeros(len(idx))))
         labels.extend(cand["label"])
     if not cols["time"]:
         return None
@@ -251,6 +256,7 @@ def run_portfolio(merged, preps, symbol_order, P, record=False):
     syms = merged["sym"]
     t_idx = merged["idx"]
     entries, sls, tps, rrs = merged["entry"], merged["sl"], merged["tp"], merged["rr"]
+    scores = merged["score"]
     labels = merged["label"]
 
     def flush(until):
@@ -277,7 +283,7 @@ def run_portfolio(merged, preps, symbol_order, P, record=False):
             sig = {"time": T, "symbol": symbol_order[sr], "side": "LONG" if side == se.LONG else "SHORT",
                    "strategy": labels[j], "entry": float(entries[j]), "sl": float(sls[j]), "tp": float(tps[j]),
                    "rr": float(rrs[j]), "htf_agree": htf_agree if P.use_htf else None,
-                   "opened": 0, "reason": None}
+                   "opened": 0, "reason": None, "score": round(float(scores[j]), 1)}
         lc = last_close.get(sr)
         if lc is not None and T - lc < P.cooldown_ms:
             if record:
@@ -363,7 +369,7 @@ def run_portfolio(merged, preps, symbol_order, P, record=False):
             "size": size, "notional": pos["notional"], "margin": pos["margin"], "leverage": pos["leverage"],
             "liquidation_price": pos["liquidation_price"], "strategy": labels[j],
             "open_time": T, "close_time": exit_t, "close_price": float(exit_price), "pnl": pnl, "fee": fee,
-            "funding": funding, "exit_type": exit_type, "rr": float(rrs[j]),
+            "funding": funding, "exit_type": exit_type, "rr": float(rrs[j]), "score": round(float(scores[j]), 1),
             "htf_agree": htf_agree if P.use_htf else None,
             "R": pnl / risk_usd if risk_usd > 0 else 0.0, "peak": float(peak), "bars": int(exit_i - t),
         })
@@ -385,11 +391,16 @@ def metrics(trades, equity, start_balance, t_from=None, t_to=None):
     if n == 0:
         out.update({"win_rate": 0.0, "avg_r": 0.0, "r_lcb": -9.0, "profit_factor": 0.0, "pnl": 0.0,
                     "return_pct": 0.0, "max_dd_pct": 0.0, "pos_months_pct": 0.0, "fees": 0.0,
-                    "long_trades": 0, "short_trades": 0, "avg_bars": 0.0})
+                    "long_trades": 0, "short_trades": 0, "avg_bars": 0.0, "wins": 0, "losses": 0,
+                    "trail_trades": 0, "trail_pnl": 0.0, "trail_pct": 0.0})
         return out
     rs = np.array([t["R"] for t in sel])
     pnls = np.array([t["pnl"] for t in sel])
-    wins = int((pnls >= 0).sum())
+    # برد/باخت فقط از معاملاتی که به هدف R:R یا حد ضرر اولیه رسیدن؛ تریلینگ جدا
+    res_kind = [paper_trader.result_of(t["exit_type"]) for t in sel]
+    wins = res_kind.count("WIN")
+    losses = res_kind.count("LOSS")
+    trail_pnl = float(sum(t["pnl"] for t, k in zip(sel, res_kind) if k == "TRAIL"))
     gp = float(pnls[pnls > 0].sum())
     gl = float(-pnls[pnls < 0].sum())
     avg_r = float(rs.mean())
@@ -416,7 +427,10 @@ def metrics(trades, equity, start_balance, t_from=None, t_to=None):
     pos_months = sum(1 for v in months.values() if v > 0) / len(months) * 100 if months else 0.0
 
     out.update({
-        "win_rate": round(wins / n * 100, 2),
+        "win_rate": round(wins / (wins + losses) * 100, 2) if (wins + losses) else 0.0,
+        "wins": wins, "losses": losses,
+        "trail_trades": res_kind.count("TRAIL"), "trail_pnl": round(trail_pnl, 2),
+        "trail_pct": round(trail_pnl / start_balance * 100, 2) if start_balance else 0.0,
         "avg_r": round(avg_r, 4),
         "r_lcb": round(lcb, 4),
         "profit_factor": round(gp / gl, 3) if gl > 0 else (99.0 if gp > 0 else 0.0),
@@ -440,7 +454,7 @@ def _iso(ms):
 
 def to_sqlite(result, start_balance, trailing):
     conn = paper_trader.get_conn(":memory:")
-    for col, coltype in (("rr_planned", "REAL"), ("htf_agree", "INTEGER"), ("r_multiple", "REAL")):
+    for col, coltype in (("rr_planned", "REAL"), ("htf_agree", "INTEGER"), ("r_multiple", "REAL"), ("score", "REAL")):
         try:
             conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {coltype}")
         except Exception:
@@ -453,19 +467,19 @@ def to_sqlite(result, start_balance, trailing):
         rows.append((t["symbol"], t["side"], t["entry"], t["sl"], t["tp"], t["sl"], t["peak"], t["size"],
                      t["notional"], t["margin"], t["leverage"], t["liquidation_price"], 1 if trailing else 0,
                      t["strategy"], "CLOSED", _iso(t["open_time"]), _iso(t["close_time"]), t["close_price"],
-                     t["pnl"], t["fee"], t["exit_type"], "WIN" if t["pnl"] >= 0 else "LOSS",
-                     t["rr"], t["htf_agree"], t["R"]))
+                     t["pnl"], t["fee"], t["exit_type"], paper_trader.result_of(t["exit_type"]),
+                     t["rr"], t["htf_agree"], t["R"], t.get("score")))
     conn.executemany("""
         INSERT INTO trades (symbol, side, entry, sl, tp, initial_sl, peak_price, size, notional, margin,
                             leverage, liquidation_price, trailing_enabled, strategy_name, status, open_time,
                             close_time, close_price, pnl, fee_cost, exit_type, result, rr_planned, htf_agree,
-                            r_multiple)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            r_multiple, score)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, rows)
     conn.executemany("""
         INSERT INTO signal_log (time, symbol, side, strategy_name, entry, sl, tp, rr, htf_agree, opened,
-                                rejection_reason) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                                rejection_reason, score) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
     """, [(_iso(s["time"]), s["symbol"], s["side"], s["strategy"], s["entry"], s["sl"], s["tp"], s["rr"],
-           s["htf_agree"], s["opened"], s["reason"]) for s in result["signals"]])
+           s["htf_agree"], s["opened"], s["reason"], s.get("score")) for s in result["signals"]])
     conn.commit()
     return conn

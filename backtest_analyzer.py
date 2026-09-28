@@ -85,28 +85,36 @@ def analyze(conn, cfg, meta):
     خروجی: دیکشنری کامل شامل معیارهای عملکرد، شکست به تفکیک‌های مختلف،
     و لیست ایرادات با شدت و پیشنهاد مشخص.
     """
+    has_score = "score" in {r[1] for r in conn.execute("PRAGMA table_info(trades)").fetchall()}
     closed = conn.execute(
         "SELECT symbol, side, result, pnl, fee_cost, margin, leverage, rr_planned, htf_agree, "
-        "exit_type, strategy_name, open_time, close_time FROM trades WHERE status='CLOSED' ORDER BY id"
+        "exit_type, strategy_name, open_time, close_time" + (", score" if has_score else ", NULL") +
+        " FROM trades WHERE status='CLOSED' ORDER BY id"
     ).fetchall()
     cols = ["symbol", "side", "result", "pnl", "fee_cost", "margin", "leverage", "rr_planned",
-            "htf_agree", "exit_type", "strategy_name", "open_time", "close_time"]
+            "htf_agree", "exit_type", "strategy_name", "open_time", "close_time", "score"]
     trades = [dict(zip(cols, row)) for row in closed]
     equity_curve = paper_trader.get_equity_curve(conn, limit=100000)
 
     total = len(trades)
+    # برد = رسیدن به هدف R:R، باخت = حد ضرر اولیه. خروج تریلینگ و بقیه جدا شمرده می‌شن.
+    for t in trades:
+        t["result"] = paper_trader.result_of(t["exit_type"])
     wins = [t for t in trades if t["result"] == "WIN"]
     losses = [t for t in trades if t["result"] == "LOSS"]
-    win_rate = round(len(wins) / total * 100, 2) if total else 0.0
+    trails = [t for t in trades if t["result"] == "TRAIL"]
+    others = [t for t in trades if t["result"] == "OTHER"]
+    rr_total = len(wins) + len(losses)
+    win_rate = round(len(wins) / rr_total * 100, 2) if rr_total else 0.0
 
-    gross_profit = sum(t["pnl"] for t in wins)
-    gross_loss = abs(sum(t["pnl"] for t in losses))
+    gross_profit = sum(t["pnl"] for t in trades if t["pnl"] > 0)
+    gross_loss = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
     total_pnl = round(sum(t["pnl"] for t in trades), 2)
     total_fees = round(sum(t["fee_cost"] or 0 for t in trades), 2)
     profit_factor = round(_safe_div(gross_profit, gross_loss, default=float("inf") if gross_profit > 0 else 0), 2)
 
-    avg_win = _safe_div(gross_profit, len(wins))
-    avg_loss = _safe_div(gross_loss, len(losses))
+    avg_win = _safe_div(sum(t["pnl"] for t in wins), len(wins))
+    avg_loss = _safe_div(abs(sum(t["pnl"] for t in losses)), len(losses))
     expectancy_per_trade = round(_safe_div(total_pnl, total), 4)
 
     balance = paper_trader.get_balance(conn, cfg.VIRTUAL_BALANCE_START)
@@ -114,10 +122,10 @@ def analyze(conn, cfg, meta):
         if cfg.VIRTUAL_BALANCE_START else 0.0
 
     max_dd_pct, max_dd_days = _max_drawdown(equity_curve)
-    longest_win_streak, longest_loss_streak = _streaks([t["result"] for t in trades])
+    longest_win_streak, longest_loss_streak = _streaks([t["result"] for t in trades if t["result"] in ("WIN", "LOSS")])
     sharpe = _sharpe_like(equity_curve)
 
-    ci = _confidence_interval_pp(win_rate, total)
+    ci = _confidence_interval_pp(win_rate, rr_total)
 
     # --- شکست به تفکیک نماد ---
     by_symbol = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0.0})
@@ -125,12 +133,13 @@ def analyze(conn, cfg, meta):
         s = by_symbol[t["symbol"]]
         s["trades"] += 1
         s["wins"] += 1 if t["result"] == "WIN" else 0
+        s["rr"] = s.get("rr", 0) + (1 if t["result"] in ("WIN", "LOSS") else 0)
         s["pnl"] += t["pnl"]
     by_symbol_list = []
     for sym, s in by_symbol.items():
         by_symbol_list.append({
             "symbol": sym, "trades": s["trades"],
-            "win_rate": round(s["wins"] / s["trades"] * 100, 1) if s["trades"] else 0,
+            "win_rate": round(s["wins"] / s["rr"] * 100, 1) if s.get("rr") else 0,
             "pnl": round(s["pnl"], 2),
         })
     by_symbol_list.sort(key=lambda x: x["pnl"])
@@ -141,8 +150,9 @@ def analyze(conn, cfg, meta):
         side_trades = [t for t in trades if t["side"] == side]
         n = len(side_trades)
         w = sum(1 for t in side_trades if t["result"] == "WIN")
+        nr = sum(1 for t in side_trades if t["result"] in ("WIN", "LOSS"))
         by_side[side] = {
-            "trades": n, "win_rate": round(w / n * 100, 1) if n else 0,
+            "trades": n, "win_rate": round(w / nr * 100, 1) if nr else 0,
             "pnl": round(sum(t["pnl"] for t in side_trades), 2),
         }
 
@@ -154,10 +164,11 @@ def analyze(conn, cfg, meta):
         k = t["htf_agree"]
         by_htf[k]["trades"] += 1
         by_htf[k]["wins"] += 1 if t["result"] == "WIN" else 0
+        by_htf[k]["rr"] = by_htf[k].get("rr", 0) + (1 if t["result"] in ("WIN", "LOSS") else 0)
         by_htf[k]["pnl"] += t["pnl"]
     by_htf_list = sorted([
         {"agree_count": k, "trades": v["trades"],
-         "win_rate": round(v["wins"] / v["trades"] * 100, 1) if v["trades"] else 0,
+         "win_rate": round(v["wins"] / v["rr"] * 100, 1) if v.get("rr") else 0,
          "pnl": round(v["pnl"], 2)}
         for k, v in by_htf.items()
     ], key=lambda x: x["agree_count"])
@@ -170,10 +181,11 @@ def analyze(conn, cfg, meta):
         month_key = t["close_time"][:7]  # YYYY-MM
         by_month[month_key]["trades"] += 1
         by_month[month_key]["wins"] += 1 if t["result"] == "WIN" else 0
+        by_month[month_key]["rr"] = by_month[month_key].get("rr", 0) + (1 if t["result"] in ("WIN", "LOSS") else 0)
         by_month[month_key]["pnl"] += t["pnl"]
     by_month_list = sorted([
         {"month": k, "trades": v["trades"],
-         "win_rate": round(v["wins"] / v["trades"] * 100, 1) if v["trades"] else 0,
+         "win_rate": round(v["wins"] / v["rr"] * 100, 1) if v.get("rr") else 0,
          "pnl": round(v["pnl"], 2)}
         for k, v in by_month.items()
     ], key=lambda x: x["month"])
@@ -187,10 +199,11 @@ def analyze(conn, cfg, meta):
         et = t.get("exit_type") or "UNKNOWN"
         by_exit_type[et]["trades"] += 1
         by_exit_type[et]["wins"] += 1 if t["result"] == "WIN" else 0
+        by_exit_type[et]["rr"] = by_exit_type[et].get("rr", 0) + (1 if t["result"] in ("WIN", "LOSS") else 0)
         by_exit_type[et]["pnl"] += t["pnl"]
     by_exit_type_list = sorted([
         {"exit_type": k, "trades": v["trades"],
-         "win_rate": round(v["wins"] / v["trades"] * 100, 1) if v["trades"] else 0,
+         "win_rate": round(v["wins"] / v["rr"] * 100, 1) if v.get("rr") else 0,
          "pnl": round(v["pnl"], 2)}
         for k, v in by_exit_type.items()
     ], key=lambda x: -x["trades"])
@@ -201,13 +214,30 @@ def analyze(conn, cfg, meta):
         sn = t.get("strategy_name") or "نامشخص"
         by_strategy[sn]["trades"] += 1
         by_strategy[sn]["wins"] += 1 if t["result"] == "WIN" else 0
+        by_strategy[sn]["rr"] = by_strategy[sn].get("rr", 0) + (1 if t["result"] in ("WIN", "LOSS") else 0)
         by_strategy[sn]["pnl"] += t["pnl"]
     by_strategy_list = sorted([
         {"strategy": k, "trades": v["trades"],
-         "win_rate": round(v["wins"] / v["trades"] * 100, 1) if v["trades"] else 0,
+         "win_rate": round(v["wins"] / v["rr"] * 100, 1) if v.get("rr") else 0,
          "pnl": round(v["pnl"], 2)}
         for k, v in by_strategy.items()
     ], key=lambda x: -x["trades"])
+
+    # --- شکست به تفکیک امتیاز ورود (آیا امتیاز بالاتر واقعاً بهتره؟) ---
+    by_score = defaultdict(lambda: {"trades": 0, "wins": 0, "rr": 0, "pnl": 0.0})
+    for t in trades:
+        sc = t.get("score")
+        if sc is None:
+            continue
+        b = min(int(sc // 10 * 10), 90)
+        d = by_score[b]
+        d["trades"] += 1
+        d["wins"] += 1 if t["result"] == "WIN" else 0
+        d["rr"] += 1 if t["result"] in ("WIN", "LOSS") else 0
+        d["pnl"] += t["pnl"]
+    by_score_list = [{"bucket": f"{k}-{min(k + 10, 100)}", "trades": v["trades"],
+                      "win_rate": round(v["wins"] / v["rr"] * 100, 1) if v["rr"] else 0,
+                      "pnl": round(v["pnl"], 2)} for k, v in sorted(by_score.items())]
 
     # --- خلاصه‌ی لاگ سیگنال (چرا سیگنال‌ها اجرا نشدن) ---
     signal_summary = _summarize_signal_log(conn)
@@ -217,7 +247,12 @@ def analyze(conn, cfg, meta):
     avg_leverage = round(sum(leverages) / len(leverages), 2) if leverages else 0
 
     overview = {
-        "total_trades": total, "wins": len(wins), "losses": len(losses), "win_rate": win_rate,
+        "total_trades": total, "rr_trades": rr_total, "wins": len(wins), "losses": len(losses), "win_rate": win_rate,
+        "trail_trades": len(trails), "trail_pnl": round(sum(t["pnl"] for t in trails), 2),
+        "trail_pct": round(sum(t["pnl"] for t in trails) / cfg.VIRTUAL_BALANCE_START * 100, 2)
+        if cfg.VIRTUAL_BALANCE_START else 0.0,
+        "trail_positive": sum(1 for t in trails if t["pnl"] > 0),
+        "other_trades": len(others), "other_pnl": round(sum(t["pnl"] for t in others), 2),
         "win_rate_95ci_pp": round(ci, 1) if ci else None,
         "profit_factor": profit_factor, "expectancy_per_trade": expectancy_per_trade,
         "avg_win": round(avg_win, 4), "avg_loss": round(avg_loss, 4),
@@ -240,6 +275,7 @@ def analyze(conn, cfg, meta):
         "by_month": by_month_list,
         "by_exit_type": by_exit_type_list,
         "by_strategy": by_strategy_list,
+        "by_score": by_score_list,
         "signal_summary": signal_summary,
         "issues": issues,
         "verdict": verdict,

@@ -70,6 +70,11 @@ def get_conn(db_path):
             opened INTEGER, rejection_reason TEXT
         )
     """)
+    for col, coltype in (("score", "REAL"), ("reasons", "TEXT")):
+        try:
+            conn.execute(f"ALTER TABLE signal_log ADD COLUMN {col} {coltype}")
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
 
     # مهاجرت نرم برای دیتابیس‌های قدیمی‌تر که این ستون‌ها رو نداشتن
@@ -80,7 +85,7 @@ def get_conn(db_path):
         ("initial_sl", "REAL"), ("peak_price", "REAL"), ("trailing_enabled", "INTEGER DEFAULT 0"),
         ("strategy_name", "TEXT"), ("exit_type", "TEXT"), ("last_bar_ts", "INTEGER"),
         ("entry_taker", "INTEGER DEFAULT 0"), ("expire_ts", "INTEGER"), ("max_hold_min", "REAL DEFAULT 0"),
-        ("fill_ts", "INTEGER"), ("timeframe", "TEXT"),
+        ("fill_ts", "INTEGER"), ("timeframe", "TEXT"), ("score", "REAL"),
     )
     for col, coltype in new_cols:
         if col not in existing_cols:
@@ -238,7 +243,7 @@ def open_trade(conn, symbol, side, entry, sl, tp, risk_pct, start_balance,
                 min_notional=5.0, max_open_positions=None,
                 max_leverage=5, leverage_safety_mult=1.6, position_pct_cap=20.0,
                 trailing_enabled=False, strategy_name=None, as_of=None,
-                pending=False, expire_ts=None, entry_taker=False, max_hold_min=0, timeframe=None):
+                pending=False, expire_ts=None, entry_taker=False, max_hold_min=0, timeframe=None, score=None):
     """
     باز کردن پوزیشن مجازی با لوریج و مدیریت سرمایه‌ی واقعی.
     pending=True: سفارش لیمیت ورود ثبت می‌شه (وضعیت PENDING، مارجین و جای پوزیشن رزرو)؛
@@ -261,12 +266,13 @@ def open_trade(conn, symbol, side, entry, sl, tp, risk_pct, start_balance,
         INSERT INTO trades (symbol, side, entry, sl, tp, initial_sl, peak_price,
                              size, notional, margin, leverage, liquidation_price,
                              trailing_enabled, strategy_name, status, open_time,
-                             entry_taker, expire_ts, max_hold_min, fill_ts, timeframe)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                             entry_taker, expire_ts, max_hold_min, fill_ts, timeframe, score)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (symbol, side, entry, sl, tp, sl, entry,
           size, notional, margin, leverage, liquidation_price,
           1 if trailing_enabled else 0, strategy_name, "PENDING" if pending else "OPEN", _now(as_of).isoformat(),
-          1 if entry_taker else 0, expire_ts, float(max_hold_min or 0), None if pending else now_ms, timeframe))
+          1 if entry_taker else 0, expire_ts, float(max_hold_min or 0), None if pending else now_ms, timeframe,
+          score))
     conn.commit()
 
     return {
@@ -342,9 +348,10 @@ def step_bar(side, entry, initial_sl, sl, tp, peak, trailing, o, h, l, c, ladder
     if side == "LONG":
         if l <= sl:
             return True, (o if o < sl else sl), "STOP", sl, sl, peak
+        # حد سود (R:R) همیشه فعاله — حتی با تریلینگ: اگه قیمت به هدف رسید، همون‌جا بسته می‌شه
+        if h >= tp:
+            return True, (o if o > tp else tp), "TP", tp, sl, peak
         if not trailing:
-            if h >= tp:
-                return True, (o if o > tp else tp), "TP", tp, sl, peak
             return False, None, None, None, sl, peak
         new_peak = max(peak, h)
         new_sl = max(compute_trailing_sl(entry, initial_sl, side, new_peak, ladder, beyond_distance_r), sl)
@@ -354,15 +361,31 @@ def step_bar(side, entry, initial_sl, sl, tp, peak, trailing, o, h, l, c, ladder
     else:
         if h >= sl:
             return True, (o if o > sl else sl), "STOP", sl, sl, peak
+        if l <= tp:
+            return True, (o if o < tp else tp), "TP", tp, sl, peak
         if not trailing:
-            if l <= tp:
-                return True, (o if o < tp else tp), "TP", tp, sl, peak
             return False, None, None, None, sl, peak
         new_peak = min(peak, l)
         new_sl = min(compute_trailing_sl(entry, initial_sl, side, new_peak, ladder, beyond_distance_r), sl)
         if new_sl < sl and c >= new_sl:
             return True, new_sl, "STOP", new_sl, new_sl, new_peak
         return False, None, None, None, new_sl, new_peak
+
+
+def result_of(exit_type):
+    """
+    برد و باخت فقط برای معاملاتی که به هدف R:R یا حد ضرر اولیه رسیدن حساب می‌شه:
+      TP → WIN، SL → LOSS
+      خروج با تریلینگ (قبل از رسیدن به هدف) → TRAIL (جدا شمرده می‌شه، نه برد نه باخت)
+      حد زمانی / دستی / پایان دیتا → OTHER
+    """
+    if exit_type == "TP":
+        return "WIN"
+    if exit_type == "SL":
+        return "LOSS"
+    if exit_type in ("TRAIL_SL", "BREAKEVEN"):
+        return "TRAIL"
+    return "OTHER"
 
 
 def classify_exit_level(kind, level, initial_sl, entry, trailing_enabled):
@@ -466,7 +489,7 @@ def _close_trade_row(conn, trade_id, side, entry, size, close_price, exit_type, 
                                  funding_pct_8h)
     pnl_net = pnl_gross - fee_cost
     balance += pnl_net
-    result = "WIN" if pnl_net >= 0 else "LOSS"
+    result = result_of(exit_type)
     conn.execute("""
         UPDATE trades SET status='CLOSED', close_time=?, close_price=?, pnl=?, fee_cost=?,
                            exit_type=?, result=?
@@ -548,7 +571,7 @@ def check_and_close_trades(conn, symbol, current_price, start_balance,
                                                maker_fee_pct, taker_fee_pct, taker_slippage_pct)
             pnl_net = pnl_gross - fee_cost
             balance += pnl_net
-            result = "WIN" if pnl_net >= 0 else "LOSS"
+            result = result_of(exit_type)
             conn.execute("""
                 UPDATE trades SET status='CLOSED', close_time=?, close_price=?, pnl=?, fee_cost=?,
                                    exit_type=?, result=?
@@ -580,7 +603,7 @@ def close_trade_manually(conn, trade_id, current_price, start_balance,
                                        entry_taker=bool(entry_taker))
     pnl_net = pnl_gross - fee_cost
     balance += pnl_net
-    result = "WIN" if pnl_net >= 0 else "LOSS"
+    result = "OTHER"
 
     conn.execute("""
         UPDATE trades SET status='CLOSED', close_time=?, close_price=?, pnl=?, fee_cost=?,
@@ -620,19 +643,20 @@ def get_open_trade_ids(conn, symbol=None):
 
 # ==================== لاگ سیگنال (چه اجرا شده چه رد شده) ====================
 
-def log_signal(conn, symbol, side, strategy_name, entry, sl, tp, rr, htf_agree, opened, rejection_reason=None, as_of=None):
+def log_signal(conn, symbol, side, strategy_name, entry, sl, tp, rr, htf_agree, opened, rejection_reason=None,
+               as_of=None, score=None, reasons=None):
     conn.execute("""
         INSERT INTO signal_log (time, symbol, side, strategy_name, entry, sl, tp, rr, htf_agree,
-                                 opened, rejection_reason)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                                 opened, rejection_reason, score, reasons)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (_now(as_of).isoformat(), symbol, side, strategy_name, entry, sl, tp, rr, htf_agree,
-          1 if opened else 0, rejection_reason))
+          1 if opened else 0, rejection_reason, score, reasons))
     conn.commit()
 
 
 def get_signal_log(conn, limit=100, offset=0, only_rejected=False):
     cols = ["id", "time", "symbol", "side", "strategy_name", "entry", "sl", "tp", "rr",
-            "htf_agree", "opened", "rejection_reason"]
+            "htf_agree", "opened", "rejection_reason", "score", "reasons"]
     where = "WHERE opened=0" if only_rejected else ""
     total = conn.execute(f"SELECT COUNT(*) FROM signal_log {where}").fetchone()[0]
     rows = conn.execute(
@@ -644,21 +668,35 @@ def get_signal_log(conn, limit=100, offset=0, only_rejected=False):
 
 # ==================== آمار ====================
 
-def get_stats(conn):
-    closed = conn.execute("SELECT result, pnl, exit_type FROM trades WHERE status='CLOSED'").fetchall()
+def get_stats(conn, initial_capital=None):
+    """
+    آمار: برد و باخت فقط از معاملاتی که به هدف R:R (برد) یا حد ضرر اولیه (باخت) رسیدن.
+    خروج‌های تریلینگ (قبل از رسیدن به هدف) جدا: تعداد، سود/زیان دلاری و درصدی از سرمایه.
+    (بر اساس نوع خروج حساب می‌شه، پس معاملات قدیمی‌تر هم درست دسته‌بندی می‌شن.)
+    """
+    closed = conn.execute("SELECT pnl, exit_type FROM trades WHERE status='CLOSED'").fetchall()
     total = len(closed)
-    wins = sum(1 for r, _, _ in closed if r == "WIN")
-    losses = total - wins
-    win_rate = round(wins / total * 100, 2) if total else 0.0
-    total_pnl = round(sum(p or 0 for _, p, _ in closed), 2)
-
+    groups = {"WIN": [], "LOSS": [], "TRAIL": [], "OTHER": []}
     exit_type_counts = {}
-    for _, _, et in closed:
+    for pnl, et in closed:
+        groups[result_of(et)].append(pnl or 0.0)
         et = et or "UNKNOWN"
         exit_type_counts[et] = exit_type_counts.get(et, 0) + 1
-
-    return {"total_trades": total, "wins": wins, "losses": losses,
-            "win_rate": win_rate, "total_pnl": total_pnl, "exit_type_counts": exit_type_counts}
+    wins, losses = len(groups["WIN"]), len(groups["LOSS"])
+    rr_total = wins + losses
+    trail_pnl = sum(groups["TRAIL"])
+    cap = float(initial_capital) if initial_capital else None
+    return {
+        "total_trades": total, "rr_trades": rr_total, "wins": wins, "losses": losses,
+        "win_rate": round(wins / rr_total * 100, 2) if rr_total else 0.0,
+        "total_pnl": round(sum(p or 0 for p, _ in closed), 2),
+        "rr_pnl": round(sum(groups["WIN"]) + sum(groups["LOSS"]), 2),
+        "trail_trades": len(groups["TRAIL"]), "trail_pnl": round(trail_pnl, 2),
+        "trail_pct": round(trail_pnl / cap * 100, 2) if cap else None,
+        "trail_positive": sum(1 for p in groups["TRAIL"] if p > 0),
+        "other_trades": len(groups["OTHER"]), "other_pnl": round(sum(groups["OTHER"]), 2),
+        "exit_type_counts": exit_type_counts,
+    }
 
 
 def get_open_trades(conn):
@@ -671,7 +709,8 @@ def get_open_trades(conn):
 
 def get_closed_trades(conn, limit=50, offset=0):
     cols = ["id", "symbol", "side", "entry", "sl", "tp", "close_price", "pnl", "fee_cost",
-            "margin", "leverage", "notional", "exit_type", "strategy_name", "result", "open_time", "close_time"]
+            "margin", "leverage", "notional", "exit_type", "strategy_name", "result", "open_time", "close_time",
+            "score"]
     total = conn.execute("SELECT COUNT(*) FROM trades WHERE status='CLOSED'").fetchone()[0]
     rows = conn.execute(
         f"SELECT {','.join(cols)} FROM trades WHERE status='CLOSED' ORDER BY id DESC LIMIT ? OFFSET ?",

@@ -65,10 +65,11 @@ def close_enough(a, b, tol=1e-9):
 
 
 VARIANTS = [
-    dict(MIN_RISK_REWARD=2.5),
-    dict(MIN_RISK_REWARD=2.0, MIN_SL_PCT=0.6, MIN_SL_ATR_MULT=1.0),
-    dict(MIN_RISK_REWARD=3.0, REQUIRE_ROOM_TO_TARGET=True),
-    dict(MIN_RISK_REWARD=2.5, MIN_SL_PCT=0.8, REQUIRE_ROOM_TO_TARGET=True, PROXIMITY_PCT=0.8),
+    dict(MIN_RISK_REWARD=2.0, WC_MIN_SCORE_PCT=70),
+    dict(MIN_RISK_REWARD=2.0, WC_MIN_SCORE_PCT=50, MIN_SL_PCT=0.6, MIN_SL_ATR_MULT=1.0),
+    dict(MIN_RISK_REWARD=2.0, WC_MIN_SCORE_PCT=60, REQUIRE_ROOM_TO_TARGET=True),
+    dict(MIN_RISK_REWARD=2.5, WC_MIN_SCORE_PCT=80, MIN_SL_PCT=0.8, REQUIRE_ROOM_TO_TARGET=True, PROXIMITY_PCT=0.8),
+    dict(MIN_RISK_REWARD=2.0, WC_MIN_SCORE_PCT=50, WC_WEIGHTS={"dow": 1.0, "sr": 3.0, "sma": 2.5, "rsi": 0.7, "cycle": 1.3}),
 ]
 
 
@@ -98,7 +99,8 @@ def test_strategy_equivalence():
                 k = np.searchsorted(f.idx, t)
                 eng = None
                 if k < len(f.idx) and f.idx[k] == t:
-                    eng = {"side": "LONG" if f.side[k] == 1 else "SHORT", "sl": f.sl[k], "tp": f.tp[k], "rr": f.rr[k]}
+                    eng = {"side": "LONG" if f.side[k] == 1 else "SHORT", "sl": f.sl[k], "tp": f.tp[k], "rr": f.rr[k],
+                           "score": f.score[k]}
                 if (live is None) != (eng is None):
                     mism += 1
                     if mism <= 5:
@@ -107,7 +109,8 @@ def test_strategy_equivalence():
                 if live is not None:
                     total_sig += 1
                     same = (live["side"] == eng["side"] and close_enough(live["sl"], eng["sl"])
-                            and close_enough(live["tp"], eng["tp"]) and close_enough(live["rr"], eng["rr"]))
+                            and close_enough(live["tp"], eng["tp"]) and close_enough(live["rr"], eng["rr"])
+                            and abs(live.get("score", 0) - eng["score"]) < 0.051)
                     if not same:
                         mism += 1
                         if mism <= 5:
@@ -117,54 +120,27 @@ def test_strategy_equivalence():
     check(total_sig > 50, "تعداد سیگنال برای تست معتبر خیلی کمه")
 
 
-def test_combine_equivalence():
-    print("۲) معادل‌بودن ترکیب استراتژی‌ها (any / all / confirm)")
-    arr = synth(2200, seed=11)
+def test_combined_live_wrapper():
+    print("۲) سیگنال از مسیر کامل ربات زنده (generate_combined_signal با پنجره‌ی بلندتر)")
+    arr = synth(1800, seed=11)
     series = se.Series(arr, "15m")
-    combos = [
-        (["dow_support_resistance", "volume_spike"], "any"),
-        (["candle_setup", "breakout", "dow_support_resistance"], "any"),
-        (["dow_support_resistance", "candle_setup"], "all"),
-        (["volume_spike", "breakout"], "all"),
-        (["dow_support_resistance", "volume_spike"], "confirm"),
-        (["candle_setup", "volume_spike", "dow_support_resistance"], "confirm"),
-    ]
-    rng = np.random.default_rng(5)
-    checked = 0
-    for active, mode in combos:
-        cfg = make_cfg(ACTIVE_STRATEGIES=active, STRATEGY_COMBINE_MODE=mode, CONFIRM_LOOKBACK_BARS=6,
-                       MIN_SL_PCT=0.3)
-        W, K = cfg.CANDLE_LIMIT, cfg.CONFIRM_LOOKBACK_BARS
-        structural = se.compute_structural(series, cfg, 0)
-        variant = fast_backtest.variant_from_cfg(cfg)
-        finals = {n: se.finalize_strategy(structural[n], series.c, variant) for n in active}
-        comb = se.combine(finals, active, mode, K)
-        eng = {int(t): (int(s), sl, tp, rr, lb) for t, s, sl, tp, rr, lb in
-               zip(comb["idx"], comb["side"], comb["sl"], comb["tp"], comb["rr"], comb["label"])}
-        ts = set(t for t in eng if t >= W + K)
-        for f in finals.values():
-            ts.update(int(x) for x in f.idx if x >= W + K)
-        ts.update(rng.integers(W + K, series.n, 120).tolist())
-        mism = 0
-        for t in sorted(ts):
-            df = series.to_df(t - W - K + 1, t + 1)
-            live = strategies.generate_combined_signal(df, cfg).get("signal")
-            e = eng.get(t)
-            if (live is None) != (e is None):
-                mism += 1
-                if mism <= 3:
-                    check(False, f"{mode} {active} t={t}: زنده={live} موتور={e}")
-                continue
-            if live:
-                checked += 1
-                same = (live["side"] == ("LONG" if e[0] == 1 else "SHORT") and close_enough(live["sl"], e[1])
-                        and close_enough(live["tp"], e[2]) and live["strategy"] == e[4])
-                if not same:
-                    mism += 1
-                    if mism <= 3:
-                        check(False, f"{mode} {active} t={t}: مقادیر فرق دارن {live} / {e}")
-        check(mism == 0, f"{mode} {active}: {mism} عدم تطابق")
-    print(f"  ✓ {checked} سیگنال ترکیبی بررسی شد")
+    cfg = make_cfg(WC_MIN_SCORE_PCT=60, MIN_SL_PCT=0.3)
+    W = cfg.CANDLE_LIMIT
+    st = se.compute_structural(series, cfg, 0)
+    f = se.finalize_strategy(st["weighted_confluence"], series.c, fast_backtest.variant_from_cfg(cfg))
+    eng = {int(t): (int(sd), sl) for t, sd, sl in zip(f.idx, f.side, f.sl)}
+    mism, checked = 0, 0
+    for t in range(W + 10, series.n, 3):
+        df = series.to_df(t - W - 9, t + 1)     # ۱۰ کندل بیشتر از پنجره، مثل ربات زنده
+        live = strategies.generate_combined_signal(df, cfg).get("signal")
+        e = eng.get(t)
+        if (live is None) != (e is None) or (live and (("LONG" if e[0] == 1 else "SHORT") != live["side"]
+                                                       or not close_enough(live["sl"], e[1]))):
+            mism += 1
+        elif live:
+            checked += 1
+    check(mism == 0, f"مسیر زنده: {mism} عدم تطابق")
+    print(f"  ✓ {checked} سیگنال")
 
 
 def test_htf_equivalence():
@@ -248,8 +224,7 @@ def _build_preps(arrs, cfg, start_ms, cut_ms=None):
 def test_no_lookahead_and_portfolio():
     print("۵) عدم نگاه به آینده + ترتیب زمانی سبد")
     arrs = {f"S{i}/USDT": synth(5000, seed=100 + i, price=10 + i * 7) for i in range(4)}
-    cfg = make_cfg(ACTIVE_STRATEGIES=["dow_support_resistance", "volume_spike", "candle_setup"],
-                   STRATEGY_COMBINE_MODE="any", HTF_TIMEFRAMES=["1h", "4h"], HTF_MIN_AGREEMENT=1,
+    cfg = make_cfg(WC_MIN_SCORE_PCT=50, HTF_TIMEFRAMES=["1h", "4h"], HTF_MIN_AGREEMENT=1,
                    SHORT_EXTRA_HTF_AGREEMENT=0, USE_TRAILING_SL=True, MAX_OPEN_POSITIONS=3)
     check(sim_engine.htf_required(4, 5, 1) == (4, 5) and sim_engine.htf_required(4, 3, 1) == (3, 3),
           "تبدیل سخت‌گیری HTF به تعداد تایم‌فریم اشتباهه")
@@ -289,8 +264,8 @@ def test_no_lookahead_and_portfolio():
     check(ok_sym, "دو پوزیشن هم‌زمان روی یک نماد!")
     print(f"  ✓ {len(res_full['trades'])} معامله، حداکثر {max_open} پوزیشن هم‌زمان")
     # حالت ورود بازار و حد زمانی هم اجرا بشن و معامله‌ی معتبر بدن
-    cfg2 = make_cfg(ACTIVE_STRATEGIES=["ema_pullback", "bb_reversion", "donchian_trend"], STRATEGY_COMBINE_MODE="any",
-                    HTF_TIMEFRAMES=["1h", "4h"], HTF_MIN_AGREEMENT=1, ENTRY_MODE="market", MAX_HOLD_MINUTES=180)
+    cfg2 = make_cfg(WC_MIN_SCORE_PCT=50, HTF_TIMEFRAMES=["1h", "4h"], HTF_MIN_AGREEMENT=1, ENTRY_MODE="market",
+                    MAX_HOLD_MINUTES=180)
     res_m, _ = fast_backtest.run_single(_build_preps(arrs, cfg2, start_ms), list(arrs), cfg2)
     types = {t["exit_type"] for t in res_m["trades"]}
     check(len(res_m["trades"]) > 20 and "TIME" in types, f"ورود بازار/حد زمانی کار نکرد: {len(res_m['trades'])} {types}")
@@ -314,7 +289,7 @@ def test_speed():
 if __name__ == "__main__":
     t_start = time.time()
     test_strategy_equivalence()
-    test_combine_equivalence()
+    test_combined_live_wrapper()
     test_htf_equivalence()
     test_path_equivalence()
     test_no_lookahead_and_portfolio()

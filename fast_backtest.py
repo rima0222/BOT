@@ -133,7 +133,8 @@ class SymbolPrep:
         self._finals = {}
 
     def finals(self, name, variant):
-        key = (name, variant["min_rr"], variant["min_sl_pct"], variant["min_sl_atr"], variant["room"])
+        key = (name, variant["min_rr"], variant["min_sl_pct"], variant["min_sl_atr"], variant["room"],
+               variant.get("min_score", 0.0))
         f = self._finals.get(key)
         if f is None:
             f = se.finalize_strategy(self.structural[name], self.series.c, variant)
@@ -227,7 +228,8 @@ def prepare_all(plan, data, symbols, cfg, progress_cb=None, strategies_needed=No
 def variant_from_cfg(cfg):
     return {"min_rr": float(cfg.MIN_RISK_REWARD), "min_sl_pct": float(getattr(cfg, "MIN_SL_PCT", 0.0)),
             "min_sl_atr": float(getattr(cfg, "MIN_SL_ATR_MULT", 0.0)),
-            "room": bool(getattr(cfg, "REQUIRE_ROOM_TO_TARGET", False))}
+            "room": bool(getattr(cfg, "REQUIRE_ROOM_TO_TARGET", False)),
+            "min_score": float(getattr(cfg, "WC_MIN_SCORE_PCT", 0.0))}
 
 
 def candidates_for(preps, active, mode, variant, lookback):
@@ -242,7 +244,7 @@ def candidates_for(preps, active, mode, variant, lookback):
 
 def run_single(preps, symbols, cfg, record=True):
     """اجرای یک تنظیم کامل (برای بک‌تست تکی پنل) با ثبت همه‌ی سیگنال‌ها."""
-    active = [a for a in cfg.ACTIVE_STRATEGIES if a in se.STRATEGY_NAMES] or ["dow_support_resistance"]
+    active = ["weighted_confluence"]
     variant = variant_from_cfg(cfg)
     cands = candidates_for(preps, active, cfg.STRATEGY_COMBINE_MODE, variant,
                            int(getattr(cfg, "CONFIRM_LOOKBACK_BARS", 8)))
