@@ -96,7 +96,7 @@ def main():
         baselines = []
         if args.baseline_file and os.path.exists(args.baseline_file):
             with open(args.baseline_file, "r", encoding="utf-8") as f:
-                baselines = [(b["name"], {"timeframe": "15m", **b["config"]}) for b in json.load(f)]
+                baselines = [(b["name"], {"timeframe": "15m", "htf": True, **b["config"]}) for b in json.load(f)]
 
         if args.data_only:
             run_data_only(args, tfs, all_symbols, base_cfg, cache, prog, job_id, t0)
@@ -107,6 +107,7 @@ def main():
         for i, tf in enumerate(tfs):
             prof = config.TIMEFRAME_PROFILES[tf]
             cfg = fast_backtest.profile_cfg(base_cfg, tf)
+            cfg._NEED_HTF = True   # مقایسه هر دو حالت (با و بدون تایید HTF) رو تست می‌کنه
             days = min(args.days, int(prof["MAX_DAYS"]))
             symbols = all_symbols[:min(len(all_symbols), int(prof["SCAN_SYMBOLS"]))]
             lo, span = i / n_tf, 1.0 / n_tf
@@ -169,6 +170,7 @@ def run_data_only(args, tfs, all_symbols, base_cfg, cache, prog, job_id, t0):
     for i, tf in enumerate(tfs):
         prof = config.TIMEFRAME_PROFILES[tf]
         cfg = fast_backtest.profile_cfg(base_cfg, tf)
+        cfg._NEED_HTF = True   # دیتای کامل، برای هر دو حالت
         days = min(args.days, int(prof["MAX_DAYS"]))
         symbols = all_symbols[:min(len(all_symbols), int(prof["SCAN_SYMBOLS"]))]
         label = tournament.TF_LABELS.get(tf, tf)

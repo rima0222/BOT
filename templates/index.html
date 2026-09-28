@@ -270,8 +270,9 @@
         </select>
       </div>
       <div class="controls-row" style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border);">
-        <label>بهبودهای قابل‌آزمایش:</label>
+        <label>فیلترها و بهبودها:</label>
         <div class="opt-grid">
+          <label class="switch-label" title="قبل از باز کردن پوزیشن، روند تایم‌فریم‌های بالاتر هم باید هم‌جهت باشه (تعدادش با سطح سخت‌گیری تعیین می‌شه). خاموش = همه‌ی استراتژی‌ها بدون این فیلتر سیگنال می‌دن."><input type="checkbox" id="optHtf"> تایید تایم‌فریم بالاتر (HTF)</label>
           <label class="switch-label" title="اگه SL خیلی نزدیک باشه، عقب‌تر برده می‌شه (حجم خودکار کم می‌شه، ریسک دلاری ثابت می‌مونه)"><input type="checkbox" id="optMinSl"> حداقل فاصله‌ی حد ضرر <span class="tip" id="optMinSlTip"></span></label>
           <label class="switch-label" title="اگه مقاومت/حمایت مقابل زودتر از هدف R:R سر راه باشه، معامله باز نمی‌شه"><input type="checkbox" id="optRoom"> شرط فضای کافی تا هدف</label>
           <label class="switch-label" title="خرید فقط وقتی روند ۴ساعته‌ی BTC نزولی نیست؛ فروش فقط وقتی صعودی نیست"><input type="checkbox" id="optBtc"> فیلتر روند بیت‌کوین</label>
@@ -506,8 +507,9 @@
         <label class="switch-label"><input type="checkbox" id="btTrailing"> تریلینگ استاپ</label>
       </div>
       <div class="controls-row">
-        <label>بهبودها:</label>
+        <label>فیلترها:</label>
         <div class="opt-grid">
+          <label class="switch-label"><input type="checkbox" id="btHtf"> تایید HTF</label>
           <label class="switch-label"><input type="checkbox" id="btMinSl"> حداقل فاصله‌ی SL</label>
           <label class="switch-label"><input type="checkbox" id="btRoom"> فضای کافی تا هدف</label>
           <label class="switch-label"><input type="checkbox" id="btBtc"> فیلتر BTC</label>
@@ -710,7 +712,7 @@ document.getElementById('trailingToggle').addEventListener('change', async (e) =
   refresh();
 });
 
-const OPT_KEYS = {optMinSl: 'min_sl', optRoom: 'room', optBtc: 'btc_filter', optLongOnly: 'long_only'};
+const OPT_KEYS = {optHtf: 'htf', optMinSl: 'min_sl', optRoom: 'room', optBtc: 'btc_filter', optLongOnly: 'long_only'};
 Object.entries(OPT_KEYS).forEach(([id, key]) => {
   document.getElementById(id).addEventListener('change', async (e) => {
     await fetch('/api/control', {
@@ -865,7 +867,7 @@ async function refresh(){
     document.getElementById('maxPos').innerText = data.max_open_positions;
     document.getElementById('maxLev').innerText = data.max_leverage + 'x';
     document.getElementById('maxPosPct').innerText = data.max_position_pct + '%';
-    document.getElementById('htfStatus').innerText = data.htf_enabled ? 'فعال' : 'غیرفعال';
+    document.getElementById('htfStatus').innerText = data.htf_enabled ? 'فعال' : 'خاموش (همه‌ی سیگنال‌ها بدون این فیلتر)';
     document.getElementById('htfMinAgree').innerText = data.htf_min_agreement;
     document.getElementById('htfMinAgreeShort').innerText = Math.min(5, data.htf_min_agreement + data.short_extra_htf_agreement);
     document.getElementById('excludedTokens').innerText =
@@ -1060,6 +1062,7 @@ async function initBacktestControls(){
       btTf.innerHTML = Object.entries(data.timeframe_profiles).map(([k,p]) => `<option value="${k}">${p.label}</option>`).join('');
       btTf.value = data.timeframe;
       document.getElementById('btEntryMode').value = data.entry_mode;
+      document.getElementById('btHtf').checked = !!data.htf_enabled;
     }
     const dataTf = document.getElementById('dataTfChecks');
     if(!dataTf.innerHTML){
@@ -1090,6 +1093,7 @@ document.getElementById('btStartBtn').addEventListener('click', async () => {
       days, top_n: topN, strictness,
       timeframe: document.getElementById('btTimeframe').value,
       entry_mode: document.getElementById('btEntryMode').value,
+      htf: document.getElementById('btHtf').checked,
       min_sl: document.getElementById('btMinSl').checked,
       room: document.getElementById('btRoom').checked,
       btc_filter: document.getElementById('btBtc').checked,
@@ -1385,6 +1389,7 @@ function backtestCompareConfig(source, idx){
   document.getElementById('btStrictness').value = conf.strictness;
   document.getElementById('btTrailing').checked = conf.trailing;
   document.getElementById('btMinSl').checked = conf.min_sl;
+  document.getElementById('btHtf').checked = conf.htf !== false;
   document.getElementById('btRoom').checked = conf.room;
   document.getElementById('btBtc').checked = conf.btc_filter;
   document.getElementById('btLongOnly').checked = conf.long_only;

@@ -71,7 +71,11 @@ def plan_jobs(symbols, days, cfg, now_ms=None):
     warm_main = (int(getattr(cfg, "CANDLE_LIMIT", 300)) + int(getattr(cfg, "CONFIRM_LOOKBACK_BARS", 8)) + 10) * main_ms
 
     resampled, fetched = [], []
-    htfs = list(getattr(cfg, "HTF_TIMEFRAMES", [])) if getattr(cfg, "USE_HTF_CONFIRMATION", True) else []
+    # دیتای تایم‌فریم‌های بالاتر وقتی لازمه که تایید HTF روشن باشه، یا مقایسه‌ی خودکار (که هر دو حالت رو تست می‌کنه)
+    need_htf = getattr(cfg, "_NEED_HTF", None)
+    if need_htf is None:
+        need_htf = getattr(cfg, "USE_HTF_CONFIRMATION", True)
+    htfs = list(getattr(cfg, "HTF_TIMEFRAMES", [])) if need_htf else []
     for tf in htfs:
         tf_ms = market_data.TF_MS.get(tf)
         # ۱ساعته و ۴ساعته رو از خود کندل‌های ۱۵ دقیقه‌ای می‌سازیم (دقیقاً همون سقف/کف‌ها،

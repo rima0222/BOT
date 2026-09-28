@@ -34,7 +34,9 @@ STRATEGY_LABELS = {
 }
 TF_LABELS = {"1m": "۱ دقیقه (اسکلپ)", "5m": "۵ دقیقه (اسکلپ)", "15m": "۱۵ دقیقه", "1h": "۱ ساعته", "4h": "۴ ساعته"}
 STRICT_FA = {"loose": "سبک‌گیر", "normal": "معمولی", "strict": "سخت‌گیر", "very_strict": "خیلی سخت‌گیر"}
-FLAG_DIMS = ("trailing", "min_sl", "room", "btc_filter", "long_only")
+FLAG_DIMS = ("htf", "trailing", "min_sl", "room", "btc_filter", "long_only")
+# بدون تایید HTF، سطح سخت‌گیری فقط روی حداقل R:R اثر داره؛ این سه سطح R:R متفاوت دارن (۲، ۲.۵، ۳)
+NO_HTF_STRICTNESS = ("loose", "normal", "very_strict")
 
 
 def stage1_sets(grid):
@@ -57,8 +59,12 @@ def describe(conf):
         strat = " و ".join(names) + " (هم‌زمان)"
     else:
         strat = f"{names[0]} با تایید {' + '.join(names[1:])}"
-    parts = [TF_LABELS.get(conf.get("timeframe"), conf.get("timeframe", "")), strat,
-             f"سخت‌گیری: {STRICT_FA.get(conf['strictness'], conf['strictness'])}",
+    if conf.get("htf", True):
+        strict_txt = f"تایید HTF: {STRICT_FA.get(conf['strictness'], conf['strictness'])}"
+    else:
+        rr = {"loose": "2", "normal": "2.5", "strict": "2.5", "very_strict": "3"}.get(conf["strictness"], "")
+        strict_txt = f"بدون تایید HTF (R:R≥{rr})"
+    parts = [TF_LABELS.get(conf.get("timeframe"), conf.get("timeframe", "")), strat, strict_txt,
              "تریلینگ" if conf["trailing"] else "TP ثابت"]
     if conf["min_sl"]:
         parts.append("حداقل فاصله‌ی SL")
@@ -94,6 +100,7 @@ def evaluate(preps, order, cfg, conf, split_ms, record=False, merged_cache=None)
             merged_cache[mkey] = merged
     P = sim_engine.SimParams(cfg, preset["HTF_MIN_AGREEMENT"], conf["trailing"], allow_long=True,
                              allow_short=not conf["long_only"], btc_filter=conf["btc_filter"])
+    P.use_htf = bool(conf.get("htf", True))
     res = sim_engine.run_portfolio(merged, preps, order, P, record=record)
     sb = P.start_balance
     return res, {
@@ -103,9 +110,10 @@ def evaluate(preps, order, cfg, conf, split_ms, record=False, merged_cache=None)
     }
 
 
-def _conf(tf, active, mode, strictness, trailing, min_sl, room, btc, long_only):
+def _conf(tf, active, mode, strictness, trailing, min_sl, room, btc, long_only, htf=True):
     return {"timeframe": tf, "active_strategies": list(active), "combine_mode": mode, "strictness": strictness,
-            "trailing": trailing, "min_sl": min_sl, "room": room, "btc_filter": btc, "long_only": long_only}
+            "htf": bool(htf), "trailing": trailing, "min_sl": min_sl, "room": room, "btc_filter": btc,
+            "long_only": long_only}
 
 
 def _conf_key(c):
@@ -172,11 +180,12 @@ def run_timeframe(preps, symbols, cfg, tf, start_ms, end_ms, grid="quick", progr
 
     s1 = []
     for active, mode in sets:
-        for st in s1_strict:
+        # با تایید HTF (دو سطح) و بدون تایید HTF — تا هر استراتژی منصفانه، با و بدون این فیلتر، سنجیده بشه
+        for htf, st in [(True, x) for x in s1_strict] + [(False, "normal")]:
             for trailing in (False, True):
                 for min_sl in ((False, True) if grid == "full" else (True,)):
-                    s1.append(_conf(tf, active, mode, st, trailing, min_sl, False, False, False))
-    est_total = len(s1) + top_k * len(s2_strict) * 32
+                    s1.append(_conf(tf, active, mode, st, trailing, min_sl, False, False, False, htf))
+    est_total = len(s1) + top_k * (len(s2_strict) + 2) * 32
     last = [0.0]
 
     def prog(i, total):
@@ -204,11 +213,12 @@ def run_timeframe(preps, symbols, cfg, tf, start_ms, end_ms, grid="quick", progr
     s2 = []
     for active, mode in top_sets:
         has_level = any(x in LEVEL_STRATEGIES for x in active)
-        for st in s2_strict:
+        no_htf = NO_HTF_STRICTNESS if grid == "full" else ("normal",)
+        for htf, st in [(True, x) for x in s2_strict] + [(False, x) for x in no_htf]:
             for trailing, min_sl, room, btc, long_only in itertools.product((False, True), repeat=5):
                 if room and not has_level:
                     continue
-                c = _conf(tf, active, mode, st, trailing, min_sl, room, btc, long_only)
+                c = _conf(tf, active, mode, st, trailing, min_sl, room, btc, long_only, htf)
                 if _conf_key(c) not in seen:
                     seen.add(_conf_key(c))
                     s2.append(c)
@@ -319,7 +329,8 @@ def _paired_effects(results):
         return tuple((k, tuple(v) if isinstance(v, list) else v) for k, v in sorted(c.items()) if k != drop)
 
     out = []
-    dims = [("trailing", "تریلینگ استاپ (در برابر TP ثابت)"),
+    dims = [("htf", "تایید تایم‌فریم بالاتر (HTF) در برابر بدون آن"),
+            ("trailing", "تریلینگ استاپ (در برابر TP ثابت)"),
             ("min_sl", "حداقل فاصله‌ی حد ضرر"),
             ("room", "شرط فضای کافی تا هدف"),
             ("btc_filter", "فیلتر روند بیت‌کوین"),
@@ -346,6 +357,8 @@ def _paired_effects(results):
 
     by_key = defaultdict(dict)
     for r in results:
+        if not r["config"].get("htf", True):
+            continue   # سطح سخت‌گیری بیشتر به تایید HTF مربوطه؛ فقط وقتی روشنه مقایسه می‌شه
         by_key[keyf(r["config"], "strictness")][r["config"]["strictness"]] = r
     for lv in ("loose", "normal", "very_strict"):
         pairs = []

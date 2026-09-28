@@ -121,6 +121,7 @@ def get_bot_settings():
     room = flag("room_to_target", getattr(config, "REQUIRE_ROOM_TO_TARGET", False))
     btc_filter = flag("btc_filter", getattr(config, "BTC_REGIME_FILTER", False))
     long_only = flag("long_only", not getattr(config, "ALLOW_SHORT", True))
+    htf = flag("htf_enabled", getattr(config, "USE_HTF_CONFIRMATION", False))
     timeframe = paper_trader.get_setting(conn, "timeframe", config.DEFAULT_TIMEFRAME)
     if timeframe not in config.TIMEFRAME_PROFILES:
         timeframe = config.DEFAULT_TIMEFRAME
@@ -144,6 +145,7 @@ def get_bot_settings():
         "long_only": long_only,
         "timeframe": timeframe,
         "entry_mode": entry_mode,
+        "htf": htf,
     }
 
 
@@ -153,7 +155,7 @@ def live_config_snapshot(settings=None):
     return {"timeframe": st["timeframe"], "active_strategies": st["active_strategies"],
             "combine_mode": st["combine_mode"],
             "strictness": st["strictness"], "trailing": st["trailing_enabled"], "min_sl": st["min_sl"],
-            "room": st["room"], "btc_filter": st["btc_filter"], "long_only": st["long_only"]}
+            "room": st["room"], "btc_filter": st["btc_filter"], "long_only": st["long_only"], "htf": st["htf"]}
 
 
 def refresh_symbols_job():
@@ -231,9 +233,6 @@ def check_htf_confirmation(symbol, side, min_agreement, htf_timeframes=None):
     پس هزینه‌ی شبکه‌اش تقریباً ناچیزه. روند رو توی تایم‌فریم‌های بالاتر چک می‌کنه و
     می‌شمره چندتاشون هم‌جهت با سیگنال هستن.
     """
-    if not getattr(config, "USE_HTF_CONFIRMATION", False):
-        return True, "غیرفعال", 0
-
     agree, disagree, neutral = 0, 0, 0
     checked = []
     wanted_trend = "uptrend" if side == "LONG" else "downtrend"
@@ -305,15 +304,18 @@ def scan_symbol(symbol, settings):
             reject("btc_regime")
             return
 
-    # ۳) تایید چند-تایم‌فریمی با سطح سخت‌گیری فعلی (SHORT به تاییدیه‌ی بیشتری نیاز داره)
-    req_long, req_short = sim_engine.htf_required(settings["htf_min_agreement"], len(cfg.HTF_TIMEFRAMES),
-                                                  config.SHORT_EXTRA_HTF_AGREEMENT)
-    min_agreement = req_short if sig["side"] == "SHORT" else req_long
-    htf_ok, htf_detail, htf_agree = check_htf_confirmation(symbol, sig["side"], min_agreement, cfg.HTF_TIMEFRAMES)
-    if not htf_ok:
-        log.info(f"[رد شد - عدم تایید تایم‌فریم بالاتر] {symbol} {sig['side']} | {htf_detail}")
-        reject("htf_disagreement", htf_agree)
-        return
+    # ۳) تایید چند-تایم‌فریمی (اختیاری، از پنل) با سطح سخت‌گیری فعلی (SHORT به تاییدیه‌ی بیشتری نیاز داره)
+    htf_detail, htf_agree = "خاموش", None
+    if settings["htf"]:
+        req_long, req_short = sim_engine.htf_required(settings["htf_min_agreement"], len(cfg.HTF_TIMEFRAMES),
+                                                      config.SHORT_EXTRA_HTF_AGREEMENT)
+        min_agreement = req_short if sig["side"] == "SHORT" else req_long
+        htf_ok, htf_detail, htf_agree = check_htf_confirmation(symbol, sig["side"], min_agreement,
+                                                               cfg.HTF_TIMEFRAMES)
+        if not htf_ok:
+            log.info(f"[رد شد - عدم تایید تایم‌فریم بالاتر] {symbol} {sig['side']} | {htf_detail}")
+            reject("htf_disagreement", htf_agree)
+            return
 
     # ۴) ثبت سفارش (لیمیت در انتظار) یا ورود بازار — با رعایت سرمایه، لوریج ایمن و سقف تنوع
     tf_ms = market_data.TF_MS[cfg.TIMEFRAME]
@@ -503,7 +505,8 @@ def api_data():
         "taker_slippage_pct": config.TAKER_SLIPPAGE_PCT,
         "max_leverage": config.MAX_LEVERAGE,
         "max_position_pct": config.MAX_POSITION_PCT_OF_CAPITAL,
-        "htf_enabled": config.USE_HTF_CONFIRMATION,
+        "htf_enabled": settings["htf"],
+        "htf": settings["htf"],
         "htf_timeframes": config.HTF_TIMEFRAMES,
         "strictness": settings["strictness"],
         "htf_min_agreement": settings["htf_min_agreement"],
@@ -617,7 +620,7 @@ def api_control():
         else:
             return jsonify({"ok": False, "error": "مدل ورود نامعتبر است"}), 400
 
-    for key, setting in (("min_sl", "min_sl"), ("room", "room_to_target"),
+    for key, setting in (("htf", "htf_enabled"), ("min_sl", "min_sl"), ("room", "room_to_target"),
                          ("btc_filter", "btc_filter"), ("long_only", "long_only")):
         if key in body:
             paper_trader.set_setting(conn, setting, "1" if body[key] else "0")
@@ -807,6 +810,8 @@ def api_backtest_start():
         overrides["ALLOW_SHORT"] = False
     if body.get("entry_mode") in ("limit", "market"):
         overrides["ENTRY_MODE"] = body["entry_mode"]
+    if "htf" in body:
+        overrides["USE_HTF_CONFIRMATION"] = bool(body["htf"])
 
     if compare_running():
         return jsonify({"ok": False, "error": "الان «مقایسه‌ی استراتژی‌ها» در حال اجراست؛ بعد از تمام شدنش امتحان کن."}), 409
@@ -941,7 +946,8 @@ def api_compare_start():
         default_conf = {"timeframe": "15m", "active_strategies": list(config.ACTIVE_STRATEGIES),
                         "combine_mode": config.STRATEGY_COMBINE_MODE,
                         "strictness": config.DEFAULT_STRICTNESS, "trailing": bool(config.USE_TRAILING_SL),
-                        "min_sl": False, "room": False, "btc_filter": False, "long_only": False}
+                        "min_sl": False, "room": False, "btc_filter": False, "long_only": False,
+                        "htf": bool(config.USE_HTF_CONFIRMATION)}
         with open(baseline_path, "w", encoding="utf-8") as f:
             json.dump([{"name": "تنظیمات فعلی ربات زنده", "config": live_conf},
                        {"name": "تنظیمات پیش‌فرض", "config": default_conf}], f, ensure_ascii=False)
@@ -1138,6 +1144,7 @@ def api_compare_apply():
     paper_trader.set_setting(conn, "long_only", "1" if c.get("long_only") else "0")
     if c.get("timeframe") in config.TIMEFRAME_PROFILES:
         paper_trader.set_setting(conn, "timeframe", c["timeframe"])
+    paper_trader.set_setting(conn, "htf_enabled", "1" if c.get("htf", True) else "0")
     log.info(f"[اعمال از مقایسه] تنظیمات جدید ربات زنده: {c}")
     return jsonify({"ok": True, "settings": get_bot_settings()})
 
