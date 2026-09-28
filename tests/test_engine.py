@@ -1,0 +1,424 @@
+# -*- coding: utf-8 -*-
+"""
+تست‌های دقت موتور بک‌تست سریع (بدون نیاز به اینترنت، با دیتای مصنوعی):
+  1) سیگنال هر استراتژی در موتور وکتوریزه == خروجی تابع زنده روی همون پنجره
+  2) ترکیب استراتژی‌ها (any / all / confirm) == strategies.generate_combined_signal
+  3) روند تایم‌فریم بالاتر == analysis.trend_from_df
+  4) مسیر معامله (SL/TP/تریلینگ با سایه) == حلقه‌ی کندل‌به‌کندل paper_trader.step_bar
+  5) عدم نگاه به آینده: کوتاه کردن دیتا، معاملات قبل از نقطه‌ی برش رو عوض نمی‌کنه
+اجرا:  python3 tests/test_engine.py
+"""
+import os
+import sys
+import time
+
+import numpy as np
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+
+import analysis  # noqa: E402
+import backtest  # noqa: E402
+import config  # noqa: E402
+import fast_backtest  # noqa: E402
+import money  # noqa: E402
+import paper_trader  # noqa: E402
+import signals_engine as se  # noqa: E402
+import sim_engine  # noqa: E402
+import strategies  # noqa: E402
+
+FAILS = []
+
+
+def check(cond, msg):
+    if not cond:
+        FAILS.append(msg)
+        print("  ✗", msg)
+
+
+def synth(n, seed=1, start_ms=1_600_000_000_000, tf_ms=900_000, price=100.0):
+    """قیمت مصنوعی با روندهای متناوب، نوسان متغیر و جهش‌های حجم."""
+    rng = np.random.default_rng(seed)
+    drift = np.repeat(rng.normal(0, 0.0012, n // 200 + 1), 200)[:n]
+    vol = np.repeat(rng.uniform(0.002, 0.008, n // 300 + 1), 300)[:n]
+    rets = drift + rng.normal(0, 1, n) * vol
+    close = price * np.exp(np.cumsum(rets))
+    open_ = np.r_[price, close[:-1]] * (1 + rng.normal(0, 0.0005, n))
+    wick = np.abs(rng.normal(0, 1, (n, 2))) * vol[:, None] * close[:, None] * 0.6
+    high = np.maximum(open_, close) + wick[:, 0]
+    low = np.minimum(open_, close) - wick[:, 1]
+    # گرد کردن به تیک قیمت (تا سقف/کف‌های برابر هم پیش بیاد، مثل دیتای واقعی)
+    tick = price * 1e-4
+    open_, high, low, close = [np.round(x / tick) * tick for x in (open_, high, low, close)]
+    high = np.maximum.reduce([high, open_, close])
+    low = np.minimum.reduce([low, open_, close])
+    volume = rng.lognormal(10, 0.4, n) * (1 + (rng.random(n) < 0.03) * rng.uniform(2, 6, n))
+    ts = start_ms + np.arange(n, dtype=np.int64) * tf_ms
+    return np.column_stack([ts, open_, high, low, close, volume]).astype(np.float64)
+
+
+def make_cfg(**over):
+    return backtest.build_config(config, over)
+
+
+def close_enough(a, b, tol=1e-9):
+    return abs(a - b) <= tol * max(1.0, abs(a), abs(b))
+
+
+VARIANTS = [
+    dict(MIN_RISK_REWARD=2.0, WC_MIN_SCORE_PCT=70),
+    dict(MIN_RISK_REWARD=2.0, WC_MIN_SCORE_PCT=50, MIN_SL_PCT=0.6, MIN_SL_ATR_MULT=1.0),
+    dict(MIN_RISK_REWARD=2.0, WC_MIN_SCORE_PCT=60, REQUIRE_ROOM_TO_TARGET=True),
+    dict(MIN_RISK_REWARD=2.5, WC_MIN_SCORE_PCT=80, MIN_SL_PCT=0.8, REQUIRE_ROOM_TO_TARGET=True, PROXIMITY_PCT=0.8),
+    dict(MIN_RISK_REWARD=2.0, WC_MIN_SCORE_PCT=50, WC_WEIGHTS={"dow": 1.0, "sr": 3.0, "sma": 2.5, "rsi": 0.7, "cycle": 1.3}),
+    dict(MIN_RISK_REWARD=2.0, WC_MIN_SCORE_PCT=50, SR_CONFIRM_BREAK="close", SR_CONFIRM_MAX_DIST_PCT=0.8,
+         WC_WEIGHTS={"dow": 1.0, "sr": 4.0, "sma": 1.0, "rsi": 1.0, "cycle": 1.0}),
+    dict(MIN_RISK_REWARD=2.0, WC_MIN_SCORE_PCT=60, SR_CONFIRM=False),
+    # شکست باکس با تنظیمات مختلف + حد سود بدون/با کارمزد + ورود بازار
+    dict(MIN_RISK_REWARD=2.0, BRK_SL_MODE="mid", BRK_MAIN_TREND="with", BRK_VOL_MULT=1.2),
+    dict(MIN_RISK_REWARD=2.0, BRK_USE_SR=False, BRK_MAIN_TREND="off", BRK_BOX_MAX_ATR=6.0, BRK_BOX_MIN_TOUCHES=1,
+         TP_NET_OF_FEES=False),
+    dict(MIN_RISK_REWARD=3.0, ENTRY_MODE="market", BRK_BOX_BARS=12, BRK_MAX_EXT_ATR=0.8, MIN_SL_PCT=0.5),
+]
+
+
+def test_strategy_equivalence():
+    print("۱) معادل‌بودن سیگنال تک‌تک استراتژی‌ها با کد زنده")
+    arr = synth(2600, seed=7)
+    series = se.Series(arr, "15m")
+    rng = np.random.default_rng(3)
+    total_sig = 0
+    per_name = {n: 0 for n in se.STRATEGY_NAMES}
+    for vi, over in enumerate(VARIANTS):
+        cfg = make_cfg(**over)
+        W = cfg.CANDLE_LIMIT
+        structural = se.compute_structural(series, cfg, 0)
+        variant = fast_backtest.variant_from_cfg(cfg)
+        finals = {name: se.finalize_strategy(structural[name], series.c, variant) for name in se.STRATEGY_NAMES}
+        # همه‌ی کندل‌هایی که موتور سیگنال داده + نمونه‌ی تصادفی از بقیه
+        test_ts = set()
+        for f in finals.values():
+            test_ts.update(f.idx[f.idx >= W - 1].tolist())
+        test_ts.update(rng.integers(W - 1, series.n, 250).tolist())
+        mism = 0
+        for t in sorted(test_ts):
+            window = series.to_df(t - W + 1, t + 1)
+            for name in se.STRATEGY_NAMES:
+                live = strategies.STRATEGY_REGISTRY[name]["fn"](window, cfg).get("signal")
+                f = finals[name]
+                k = np.searchsorted(f.idx, t)
+                eng = None
+                if k < len(f.idx) and f.idx[k] == t:
+                    eng = {"side": "LONG" if f.side[k] == 1 else "SHORT", "sl": f.sl[k], "tp": f.tp[k], "rr": f.rr[k],
+                           "score": f.score[k]}
+                if (live is None) != (eng is None):
+                    mism += 1
+                    if mism <= 5:
+                        check(False, f"[v{vi}] {name} t={t}: زنده={live} موتور={eng}")
+                    continue
+                if live is not None:
+                    total_sig += 1
+                    per_name[name] += 1
+                    same = (live["side"] == eng["side"] and close_enough(live["sl"], eng["sl"])
+                            and close_enough(live["tp"], eng["tp"]) and close_enough(live["rr"], eng["rr"])
+                            and (live.get("score") is None and np.isnan(eng["score"])
+                                 or live.get("score") is not None and abs(live["score"] - eng["score"]) < 0.051))
+                    if not same:
+                        mism += 1
+                        if mism <= 5:
+                            check(False, f"[v{vi}] {name} t={t}: مقادیر فرق دارن زنده={live} موتور={eng}")
+        check(mism == 0, f"[v{vi}] {mism} مورد عدم تطابق")
+    print(f"  ✓ {total_sig} سیگنال بررسی شد {per_name}")
+    check(all(v > 50 for v in per_name.values()), f"تعداد سیگنال برای تست معتبر خیلی کمه {per_name}")
+
+
+def test_combined_live_wrapper():
+    print("۲) سیگنال از مسیر کامل ربات زنده (generate_combined_signal با پنجره‌ی بلندتر)")
+    arr = synth(1800, seed=11)
+    series = se.Series(arr, "15m")
+    for name in se.STRATEGY_NAMES:
+        cfg = make_cfg(WC_MIN_SCORE_PCT=60, MIN_SL_PCT=0.3, ACTIVE_STRATEGIES=[name])
+        W = cfg.CANDLE_LIMIT
+        st = se.compute_structural(series, cfg, 0)
+        f = se.finalize_strategy(st[name], series.c, fast_backtest.variant_from_cfg(cfg))
+        eng = {int(t): (int(sd), sl, tp) for t, sd, sl, tp in zip(f.idx, f.side, f.sl, f.tp)}
+        mism, checked = 0, 0
+        for t in range(W + 10, series.n, 2):
+            df = series.to_df(t - W - 9, t + 1)     # ۱۰ کندل بیشتر از پنجره، مثل ربات زنده
+            r = strategies.generate_combined_signal(df, cfg)
+            live = r.get("signal")
+            e = eng.get(t)
+            if (live is None) != (e is None) or (live and (("LONG" if e[0] == 1 else "SHORT") != live["side"]
+                                                           or not close_enough(live["sl"], e[1])
+                                                           or not close_enough(live["tp"], e[2])
+                                                           or live["strategy"] != name)):
+                mism += 1
+            elif live:
+                checked += 1
+        check(mism == 0, f"مسیر زنده {name}: {mism} عدم تطابق")
+        check(checked > 5, f"مسیر زنده {name}: سیگنال خیلی کم ({checked})")
+        print(f"  ✓ {name}: {checked} سیگنال")
+
+
+def test_htf_equivalence():
+    print("۳) معادل‌بودن روند تایم‌فریم بالاتر")
+    arr = synth(900, seed=21, tf_ms=14_400_000)
+    hs = se.Series(arr, "4h")
+    tr = se.htf_trend_series(hs, config.SWING_ORDER, config.HTF_CANDLE_LIMIT)
+    mism = 0
+    for j in range(5, hs.n):
+        s = max(0, j - config.HTF_CANDLE_LIMIT + 1)
+        df = hs.to_df(s, j + 1)
+        if len(df) < config.SWING_ORDER * 2 + 5:
+            live = 2
+        else:
+            t = analysis.trend_from_df(df, swing_order=config.SWING_ORDER)
+            live = {"uptrend": 1, "downtrend": -1}.get(t, 0)
+        if live != tr[j]:
+            mism += 1
+    check(mism == 0, f"روند HTF: {mism} عدم تطابق")
+    # هم‌ترازی زمانی: کندل ۴ساعته فقط بعد از بسته شدنش دیده می‌شه
+    main = se.Series(synth(4000, seed=2), "15m")
+    al_idx = np.searchsorted(hs.close_ts, main.close_ts, "right") - 1
+    ok = al_idx >= 0
+    check(bool((hs.close_ts[al_idx[ok]] <= main.close_ts[ok]).all()), "HTF از آینده استفاده کرده!")
+    print("  ✓ انجام شد")
+
+
+def test_path_equivalence():
+    print("۴) معادل‌بودن مسیر معامله با مدیریت کندل‌به‌کندل زنده")
+    arr = synth(6000, seed=33)
+    s = se.Series(arr, "15m")
+    ladder = config.TRAILING_SL_LADDER
+    beyond = config.TRAILING_SL_BEYOND_DISTANCE_R
+    sim = sim_engine.PathSim(s, ladder, beyond, config.TRAIL_PROFILES)
+    rng = np.random.default_rng(9)
+    mism = 0
+    n_checked = 0
+    for _ in range(1500):
+        t0 = int(rng.integers(10, s.n - 50))
+        side = 1 if rng.random() < 0.5 else -1
+        entry = s.c[t0]
+        dist = entry * rng.uniform(0.002, 0.03)
+        sl = entry - dist if side == 1 else entry + dist
+        tp = entry + dist * 2.5 if side == 1 else entry - dist * 2.5
+        floor = money.breakeven_stop(side == 1, entry, 0.0002, 0.0009)
+        cases = [(False, 0, None), (True, 0, None), (False, 7, None), (True, 12, None), (True, 0, floor),
+                 (True, 9, floor)] + [(name, 0, floor) for name in config.TRAIL_PROFILES]
+        for trailing, hold, fl in cases:
+            r = sim._run(t0, side, entry, sl, tp, trailing, hold, fl)
+            if isinstance(trailing, str):
+                lad, bey = config.TRAIL_PROFILES[trailing]["ladder"], config.TRAIL_PROFILES[trailing]["beyond"]
+            else:
+                lad, bey = ladder, beyond
+            # مرجع: حلقه‌ی step_bar
+            side_s = "LONG" if side == 1 else "SHORT"
+            cur_sl, peak = sl, entry
+            ref = None
+            last_k = min(s.n, t0 + 1 + hold) if hold else s.n
+            for k in range(t0 + 1, last_k):
+                hit, price, kind, level, cur_sl, peak = paper_trader.step_bar(
+                    side_s, entry, sl, cur_sl, tp, peak, bool(trailing), s.o[k], s.h[k], s.l[k], s.c[k], lad, bey,
+                    fl)
+                if hit:
+                    ref = (k, price, kind, level)
+                    break
+            if ref is None:
+                ref = (last_k - 1, s.c[last_k - 1], "TIME" if last_k < s.n else "END", None)
+            n_checked += 1
+            same = (r[0] == ref[0] and close_enough(r[1], ref[1], 1e-12) and r[2] == ref[2]
+                    and ((r[3] is None and ref[3] is None) or (r[3] is not None and ref[3] is not None
+                                                               and close_enough(r[3], ref[3], 1e-12))))
+            if not same:
+                mism += 1
+                if mism <= 5:
+                    check(False, f"مسیر t0={t0} side={side} trailing={trailing} floor={fl}: موتور={r[:4]} مرجع={ref}")
+    check(mism == 0, f"مسیر معامله: {mism} عدم تطابق از {n_checked}")
+    print(f"  ✓ {n_checked} مسیر بررسی شد")
+
+
+def _build_preps(arrs, cfg, start_ms, cut_ms=None):
+    preps = {}
+    for sym, a in arrs.items():
+        main = a if cut_ms is None else a[a[:, 0] + 900_000 <= cut_ms]
+        htf = {"1h": fast_backtest._resample(main, "15m", "1h"), "4h": fast_backtest._resample(main, "15m", "4h")}
+        preps[sym] = fast_backtest.prepare_symbol(sym, main, htf, None, start_ms, cfg)
+    return preps
+
+
+def test_no_lookahead_and_portfolio():
+    for name, over in (("weighted_confluence", {}),
+                       ("box_breakout", {"BRK_MAIN_TREND": "off", "BRK_BOX_MAX_ATR": 6.0, "TRAIL_PROFILE": "tight"})):
+        _lookahead_and_portfolio(name, over)
+
+
+def _lookahead_and_portfolio(name, over):
+    print(f"۵) عدم نگاه به آینده + ترتیب زمانی سبد ({name})")
+    arrs = {f"S{i}/USDT": synth(5000, seed=100 + i, price=10 + i * 7) for i in range(4)}
+    cfg = make_cfg(WC_MIN_SCORE_PCT=50, HTF_TIMEFRAMES=["1h", "4h"], HTF_MIN_AGREEMENT=1,
+                   SHORT_EXTRA_HTF_AGREEMENT=0, USE_TRAILING_SL=True, MAX_OPEN_POSITIONS=3,
+                   ACTIVE_STRATEGIES=[name], **over)
+    check(sim_engine.htf_required(4, 5, 1) == (4, 5) and sim_engine.htf_required(4, 3, 1) == (3, 3),
+          "تبدیل سخت‌گیری HTF به تعداد تایم‌فریم اشتباهه")
+    start_ms = int(arrs["S0/USDT"][400, 0])
+    full = _build_preps(arrs, cfg, start_ms)
+    res_full, _ = fast_backtest.run_single(full, list(arrs), cfg)
+    cut_ms = int(arrs["S0/USDT"][3200, 0])
+    part = _build_preps(arrs, cfg, start_ms, cut_ms)
+    res_part, _ = fast_backtest.run_single(part, list(arrs), cfg)
+
+    def key(t):
+        return (t["symbol"], t["open_time"], t["side"], round(t["entry"], 10), round(t["pnl"], 8), t["close_time"])
+
+    # معاملاتی که سیگنالشون نزدیک نقطه‌ی برش بوده (سفارش لیمیت هنوز منتظر پر شدن) کنار گذاشته می‌شن
+    margin_ms = 900_000 * (cfg.LIMIT_WAIT_BARS + 1)
+    closed_before = [key(t) for t in res_full["trades"] if t["close_time"] < cut_ms - margin_ms]
+    part_before = [key(t) for t in res_part["trades"] if t["close_time"] < cut_ms - margin_ms
+                   and t["exit_type"] != "END"]
+    check(len(res_full["trades"]) > 20, f"تعداد معامله‌ی تست خیلی کمه ({len(res_full['trades'])})")
+    check(closed_before == part_before,
+          f"نگاه به آینده! {len(closed_before)} در برابر {len(part_before)} معامله قبل از برش")
+    # هیچ‌وقت بیش از سقف پوزیشن باز هم‌زمان نداریم، و هر نماد حداکثر یک پوزیشن
+    events = []
+    for t in res_full["trades"]:
+        events.append((t["open_time"], 1, t["symbol"]))
+        events.append((t["close_time"], -1, t["symbol"]))
+    events.sort(key=lambda e: (e[0], e[1]))
+    open_now, per_sym, max_open = 0, {}, 0
+    ok_sym = True
+    for tm, d, sym in events:
+        open_now += d
+        per_sym[sym] = per_sym.get(sym, 0) + d
+        if per_sym[sym] > 1:
+            ok_sym = False
+        max_open = max(max_open, open_now)
+    check(max_open <= cfg.MAX_OPEN_POSITIONS, f"سقف پوزیشن رعایت نشده ({max_open})")
+    check(ok_sym, "دو پوزیشن هم‌زمان روی یک نماد!")
+    print(f"  ✓ {len(res_full['trades'])} معامله، حداکثر {max_open} پوزیشن هم‌زمان")
+    # حالت ورود بازار و حد زمانی هم اجرا بشن و معامله‌ی معتبر بدن
+    cfg2 = make_cfg(WC_MIN_SCORE_PCT=50, HTF_TIMEFRAMES=["1h", "4h"], HTF_MIN_AGREEMENT=1, ENTRY_MODE="market",
+                    MAX_HOLD_MINUTES=180, ACTIVE_STRATEGIES=[name], **over)
+    res_m, _ = fast_backtest.run_single(_build_preps(arrs, cfg2, start_ms), list(arrs), cfg2)
+    types = {t["exit_type"] for t in res_m["trades"]}
+    check(len(res_m["trades"]) > 20 and "TIME" in types, f"ورود بازار/حد زمانی کار نکرد: {len(res_m['trades'])} {types}")
+    # R هر معامله = سود خالص ÷ ضرر خالص برنامه‌ریزی‌شده؛ باخت بدون گپ باید دقیقاً ۱R- باشه
+    sl_r = [t["R"] for t in res_full["trades"] if t["exit_type"] == "SL"]
+    check(len(sl_r) > 0 and all(r <= -0.999 for r in sl_r), f"R باخت‌ها اشتباهه: {sl_r[:5]}")
+    tp_r = [t["R"] for t in res_full["trades"] if t["exit_type"] == "TP"]
+    check(all(r >= 1.99 for r in tp_r), f"R بردها اشتباهه: {tp_r[:5]}")
+    tr_r = [t["R"] for t in res_full["trades"] if t["exit_type"] in ("TRAIL_SL", "BREAKEVEN")]
+    check(all(r > -0.2 for r in tr_r), f"تریلینگ با ضرر محسوس بسته شده: {sorted(tr_r)[:5]}")
+    check(all(t["bars"] <= 12 + 1 for t in res_m["trades"] if t["exit_type"] != "END"), "حد زمانی رعایت نشده")
+    print(f"  ✓ ورود بازار + حد زمانی: {len(res_m['trades'])} معامله، انواع خروج: {sorted(types)}")
+
+
+def test_speed():
+    print("۶) سرعت (۲ سال کندل ۱۵ دقیقه‌ای برای یک نماد)")
+    arr = synth(70_080, seed=77)
+    cfg = make_cfg()
+    t0 = time.time()
+    htf = {"1h": fast_backtest._resample(arr, "15m", "1h"), "4h": fast_backtest._resample(arr, "15m", "4h")}
+    prep = fast_backtest.prepare_symbol("X/USDT", arr, htf, None, int(arr[300, 0]), cfg)
+    t1 = time.time()
+    print(f"  آماده‌سازی: {t1 - t0:.2f} ثانیه")
+    check(t1 - t0 < 30, "آماده‌سازی خیلی کنده")
+    return prep
+
+
+def test_money_management():
+    print("۷) مدیریت سرمایه: ضرر خالص ثابت دلاری و سود خالص = R:R × ضرر (بعد از کارمزد)")
+    cfg = make_cfg(RISK_MODE="usd", RISK_USD=5.0, MIN_RISK_REWARD=2.0, TP_NET_OF_FEES=True)
+    rng = np.random.default_rng(5)
+    bad = 0
+    for _ in range(400):
+        side = "LONG" if rng.random() < 0.5 else "SHORT"
+        entry_taker = rng.random() < 0.3
+        c = make_cfg(RISK_MODE="usd", RISK_USD=5.0, MIN_RISK_REWARD=2.0, TP_NET_OF_FEES=True,
+                     ENTRY_MODE="market" if entry_taker else "limit")
+        entry = float(rng.uniform(0.01, 60000))
+        dist = entry * float(rng.uniform(0.002, 0.05))
+        sl = entry - dist if side == "LONG" else entry + dist
+        sig = analysis.finalize_signal(side, entry, sl, None, dist, c, tp_uses_level=False)
+        fi, fs, fm = money.cfg_fee_fracs(c)
+        pos = paper_trader.compute_position_size(side, entry, sig["sl"], 0.5, 10**9, 0, 0, max_leverage=1, min_notional=0.0,
+                                                 position_pct_cap=100, risk_usd=5.0, fees=(fi, fs))
+        size = pos["size"]
+        mk, tk, sp = c.MAKER_FEE_PCT, c.TAKER_FEE_PCT, c.TAKER_SLIPPAGE_PCT
+
+        def net(exit_price, exit_type):
+            gross = (exit_price - entry) * size if side == "LONG" else (entry - exit_price) * size
+            fee = paper_trader._fee_for_exit(entry, exit_price, size, exit_type, mk, tk, sp, entry_taker=entry_taker)[0]
+            return gross - fee
+        loss, win = net(sig["sl"], "SL"), net(sig["tp"], "TP")
+        be = money.breakeven_stop(side == "LONG", entry, fi, fs)
+        if not (abs(loss + 5.0) < 1e-6 and abs(win - 10.0) < 1e-6 and abs(net(be, "TRAIL_SL")) < 1e-6):
+            bad += 1
+            if bad <= 3:
+                check(False, f"{side} ورود={entry} ضرر={loss} سود={win} سربه‌سر={net(be, 'TRAIL_SL')}")
+    check(bad == 0, f"مدیریت سرمایه: {bad} مورد اشتباه")
+    print("  ✓ ضرر خالص = ۵$، سود خالص = ۱۰$، سربه‌سر تریلینگ = ۰$ (۴۰۰ حالت تصادفی)")
+
+
+def test_htf_weighted():
+    print("۸) تایید HTF وزن‌دار + نمودار ارز÷BTC == محاسبه‌ی ربات زنده")
+    main = synth(3000, seed=41)
+    btc_main = synth(3000, seed=42, price=60000.0)
+    tfs = ["1h", "4h"]
+    cfg = make_cfg(HTF_TIMEFRAMES=tfs, BTC_REGIME_TIMEFRAME="4h", BTC_PAIR_WEIGHT=3.0, HTF_WEIGHTED=True)
+    htf = {tf: fast_backtest._resample(main, "15m", tf) for tf in tfs}
+    btc4 = fast_backtest._resample(btc_main, "15m", "4h")
+    prep = fast_backtest.prepare_symbol("X/USDT", main, htf, btc4, int(main[400, 0]), cfg)
+    pw = sim_engine.pair_weight_for("X/USDT", cfg)
+    check(pw == 3.0 and sim_engine.pair_weight_for("BTC/USDT", cfg) == 0.0, "وزن نسبت به BTC اشتباهه")
+    hs4 = se.Series(htf["4h"], "4h")
+    bs4 = se.Series(btc4, "4h")
+    pair_seen = 0
+    rng = np.random.default_rng(2)
+    mism = 0
+    for t in rng.integers(400, prep.series.n, 200).tolist():
+        close_t = prep.series.close_ts[t]
+        trends = {}
+        for tf in tfs:
+            hs = se.Series(htf[tf], tf)
+            j = int(np.searchsorted(hs.close_ts, close_t, "right")) - 1
+            if j < 0:
+                continue
+            df = hs.to_df(max(0, j - cfg.HTF_CANDLE_LIMIT + 1), j + 1)
+            if len(df) < cfg.SWING_ORDER * 2 + 5:
+                continue
+            trends[tf] = analysis.trend_from_df(df, swing_order=cfg.SWING_ORDER)
+        # نمودار ارز÷BTC مثل ربات زنده: آخرین HTF_CANDLE_LIMIT کندل بسته‌شده‌ی هر دو، ادغام روی زمان
+        pair = None
+        j = int(np.searchsorted(hs4.close_ts, close_t, "right")) - 1
+        jb = int(np.searchsorted(bs4.close_ts, close_t, "right")) - 1
+        if j >= 0 and jb >= 0:
+            N = cfg.HTF_CANDLE_LIMIT
+            rdf = se.pair_ratio_df(hs4.to_df(max(0, j - N + 1), j + 1), bs4.to_df(max(0, jb - N + 1), jb + 1))
+            if len(rdf) >= cfg.SWING_ORDER * 2 + 5:
+                pair = analysis.trend_from_df(rdf, swing_order=cfg.SWING_ORDER)
+                pair_seen += pair in ("uptrend", "downtrend")
+        pl = sim_engine.htf_weighted_pct(trends, tfs, "LONG", pair, pw)
+        ps = sim_engine.htf_weighted_pct(trends, tfs, "SHORT", pair, pw)
+        if not (close_enough(pl, prep.htf_wlong[t]) and close_enough(ps, prep.htf_wshort[t])):
+            mism += 1
+    check(mism == 0, f"HTF وزن‌دار: {mism} عدم تطابق")
+    check(pair_seen > 50, f"روند نسبت به BTC خیلی کم دیده شد ({pair_seen})")
+    check(sim_engine.htf_required_pct(3, 1) == (60.0, 80.0), "درصد لازم HTF اشتباهه")
+    print("  ✓ انجام شد")
+
+
+if __name__ == "__main__":
+    t_start = time.time()
+    test_strategy_equivalence()
+    test_combined_live_wrapper()
+    test_htf_equivalence()
+    test_path_equivalence()
+    test_no_lookahead_and_portfolio()
+    test_speed()
+    test_money_management()
+    test_htf_weighted()
+    print()
+    if FAILS:
+        print(f"❌ {len(FAILS)} خطا")
+        sys.exit(1)
+    print(f"✅ همه‌ی تست‌ها موفق ({time.time() - t_start:.1f} ثانیه)")
