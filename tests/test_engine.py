@@ -82,6 +82,13 @@ VARIANTS = [
 ]
 
 
+def live_cfg_for(name, cfg):
+    """تابع زنده و تنظیمات معادل هر کلید موتور (box_breakout@retest = شکست باکس با ورود پولبک)."""
+    base = name.split("@")[0]
+    c = backtest.build_config(cfg, {"BRK_ENTRY": "retest" if name.endswith("@retest") else "close"})
+    return strategies.STRATEGY_REGISTRY[base]["fn"], c
+
+
 def test_strategy_equivalence():
     print("۱) معادل‌بودن سیگنال تک‌تک استراتژی‌ها با کد زنده")
     arr = synth(2600, seed=7)
@@ -94,7 +101,9 @@ def test_strategy_equivalence():
         W = cfg.CANDLE_LIMIT
         structural = se.compute_structural(series, cfg, 0)
         variant = fast_backtest.variant_from_cfg(cfg)
-        finals = {name: se.finalize_strategy(structural[name], series.c, variant) for name in se.STRATEGY_NAMES}
+        live_cfgs = {name: live_cfg_for(name, cfg) for name in se.STRATEGY_NAMES}
+        prep_like = fast_backtest.SymbolPrep("T", series, structural, None, None, None, 0, cfg)
+        finals = {name: prep_like.finals(name, variant) for name in se.STRATEGY_NAMES}
         # همه‌ی کندل‌هایی که موتور سیگنال داده + نمونه‌ی تصادفی از بقیه
         test_ts = set()
         for f in finals.values():
@@ -104,13 +113,14 @@ def test_strategy_equivalence():
         for t in sorted(test_ts):
             window = series.to_df(t - W + 1, t + 1)
             for name in se.STRATEGY_NAMES:
-                live = strategies.STRATEGY_REGISTRY[name]["fn"](window, cfg).get("signal")
+                fn, lcfg = live_cfgs[name]
+                live = fn(window, lcfg).get("signal")
                 f = finals[name]
                 k = np.searchsorted(f.idx, t)
                 eng = None
                 if k < len(f.idx) and f.idx[k] == t:
                     eng = {"side": "LONG" if f.side[k] == 1 else "SHORT", "sl": f.sl[k], "tp": f.tp[k], "rr": f.rr[k],
-                           "score": f.score[k]}
+                           "score": f.score[k], "entry": f.entry[k]}
                 if (live is None) != (eng is None):
                     mism += 1
                     if mism <= 5:
@@ -120,6 +130,7 @@ def test_strategy_equivalence():
                     total_sig += 1
                     per_name[name] += 1
                     same = (live["side"] == eng["side"] and close_enough(live["sl"], eng["sl"])
+                            and close_enough(live["entry"], eng["entry"])
                             and close_enough(live["tp"], eng["tp"]) and close_enough(live["rr"], eng["rr"])
                             and (live.get("score") is None and np.isnan(eng["score"])
                                  or live.get("score") is not None and abs(live["score"] - eng["score"]) < 0.051))
@@ -137,10 +148,13 @@ def test_combined_live_wrapper():
     arr = synth(1800, seed=11)
     series = se.Series(arr, "15m")
     for name in se.STRATEGY_NAMES:
-        cfg = make_cfg(WC_MIN_SCORE_PCT=60, MIN_SL_PCT=0.3, ACTIVE_STRATEGIES=[name])
+        cfg = make_cfg(WC_MIN_SCORE_PCT=60, MIN_SL_PCT=0.3, ACTIVE_STRATEGIES=[name.split("@")[0]],
+                       BRK_ENTRY="retest" if name.endswith("@retest") else "close")
+        check(strategies.engine_name(cfg) == name, f"engine_name اشتباه برای {name}")
         W = cfg.CANDLE_LIMIT
         st = se.compute_structural(series, cfg, 0)
-        f = se.finalize_strategy(st[name], series.c, fast_backtest.variant_from_cfg(cfg))
+        f = fast_backtest.SymbolPrep("T", series, st, None, None, None, 0, cfg).finals(
+            name, fast_backtest.variant_from_cfg(cfg))
         eng = {int(t): (int(sd), sl, tp) for t, sd, sl, tp in zip(f.idx, f.side, f.sl, f.tp)}
         mism, checked = 0, 0
         for t in range(W + 10, series.n, 2):
@@ -151,7 +165,7 @@ def test_combined_live_wrapper():
             if (live is None) != (e is None) or (live and (("LONG" if e[0] == 1 else "SHORT") != live["side"]
                                                            or not close_enough(live["sl"], e[1])
                                                            or not close_enough(live["tp"], e[2])
-                                                           or live["strategy"] != name)):
+                                                           or live["strategy"] != name.split("@")[0])):
                 mism += 1
             elif live:
                 checked += 1
@@ -297,7 +311,7 @@ def _lookahead_and_portfolio(name, over):
     print(f"  ✓ {len(res_full['trades'])} معامله، حداکثر {max_open} پوزیشن هم‌زمان")
     # حالت ورود بازار و حد زمانی هم اجرا بشن و معامله‌ی معتبر بدن
     cfg2 = make_cfg(WC_MIN_SCORE_PCT=50, HTF_TIMEFRAMES=["1h", "4h"], HTF_MIN_AGREEMENT=1, ENTRY_MODE="market",
-                    MAX_HOLD_MINUTES=180, ACTIVE_STRATEGIES=[name], **over)
+                    MAX_HOLD_MINUTES=180, ACTIVE_STRATEGIES=[name], **dict(over, BRK_ENTRY="close", EARLY_EXIT=False))
     res_m, _ = fast_backtest.run_single(_build_preps(arrs, cfg2, start_ms), list(arrs), cfg2)
     types = {t["exit_type"] for t in res_m["trades"]}
     check(len(res_m["trades"]) > 20 and "TIME" in types, f"ورود بازار/حد زمانی کار نکرد: {len(res_m['trades'])} {types}")
@@ -407,6 +421,81 @@ def test_htf_weighted():
     print("  ✓ انجام شد")
 
 
+def test_live_process_bars():
+    print("۹) مدیریت پوزیشن ربات زنده (process_bars) == موتور بک‌تست (با خروج زودهنگام، تریلینگ، کف سربه‌سر)")
+    from datetime import datetime
+    arr = synth(4000, seed=61, tf_ms=60_000)
+    s = se.Series(arr, "1m")
+    mk, tk, sp = 0.02, 0.06, 0.03
+    rng = np.random.default_rng(4)
+    mism, n = 0, 0
+    kinds = set()
+    for prof in list(config.TRAIL_PROFILES) + [False]:
+        lad = config.TRAIL_PROFILES[prof]["ladder"] if prof else []
+        bey = config.TRAIL_PROFILES[prof]["beyond"] if prof else 0.5
+        sim = sim_engine.PathSim(s, lad, bey, config.TRAIL_PROFILES)
+        for _ in range(120):
+            t0 = int(rng.integers(10, s.n - 400))
+            side = 1 if rng.random() < 0.5 else -1
+            entry = float(s.c[t0])
+            dist = entry * float(rng.uniform(0.002, 0.02))
+            sl = entry - dist if side == 1 else entry + dist
+            tp = entry + dist * 2.1 if side == 1 else entry - dist * 2.1
+            early = (int(rng.integers(2, 8)), float(rng.choice([0.2, 0.3, 0.5])))
+            fi, fs, _ = money.fee_fracs(mk, tk, sp, False)
+            floor = money.breakeven_stop(side == 1, entry, fi, fs) if prof else None
+            r = sim._run(t0, side, entry, sl, tp, prof, 0, floor, early)
+            conn = paper_trader.get_conn(":memory:")
+            as_of = datetime.utcfromtimestamp(s.close_ts[t0] / 1000)
+            paper_trader.open_trade(conn, "X/USDT", "LONG" if side == 1 else "SHORT", entry, sl, tp, 1.0, 1e9,
+                                    min_notional=0, max_leverage=1, position_pct_cap=100, trailing_enabled=bool(prof),
+                                    as_of=as_of, timeframe="1m")
+            bars = [(int(s.ts[k]), s.o[k], s.h[k], s.l[k], s.c[k]) for k in range(t0 + 1, s.n)]
+            paper_trader.process_bars(conn, "X/USDT", bars, 1e9, lad, bey, mk, tk, sp, 0.0,
+                                      now_ms=int(s.close_ts[-1]), trail_floor=bool(prof),
+                                      early_bars=early[0], early_min_r=early[1])
+            row = conn.execute("SELECT close_price, exit_type, close_time FROM trades").fetchone()
+            n += 1
+            if r[2] == "END":
+                ok = row[1] is None
+            else:
+                exp_type = paper_trader.classify_exit_level(r[2], r[3], sl, entry, bool(prof))
+                exp_close = datetime.utcfromtimestamp(s.close_ts[r[0]] / 1000).isoformat()
+                ok = (row[1] == exp_type and close_enough(row[0], r[1], 1e-12) and row[2] == exp_close)
+                kinds.add(exp_type)
+            if not ok:
+                mism += 1
+                if mism <= 5:
+                    check(False, f"process_bars t0={t0} side={side} prof={prof} early={early}: موتور={r[:4]} زنده={row}")
+    check(mism == 0, f"process_bars: {mism} عدم تطابق از {n}")
+    check({"EARLY", "SL", "TP"} <= kinds, f"انواع خروج کافی تست نشد: {kinds}")
+    print(f"  ✓ {n} معامله، انواع خروج: {sorted(kinds)}")
+
+
+def test_daily_loss_limit():
+    print("۱۰) حد ضرر روزانه")
+    arrs = {f"S{i}/USDT": synth(5000, seed=300 + i, price=10 + i * 5) for i in range(5)}
+    base = dict(HTF_TIMEFRAMES=["1h", "4h"], USE_HTF_CONFIRMATION=False, ACTIVE_STRATEGIES=["box_breakout"],
+                BRK_MAIN_TREND="off", BRK_BOX_MAX_ATR=6.0, MAX_OPEN_POSITIONS=5, COOLDOWN_HOURS=0,
+                EARLY_EXIT=False, USE_TRAILING_SL=False)
+    start_ms = int(arrs["S0/USDT"][400, 0])
+    res_off, _ = fast_backtest.run_single(_build_preps(arrs, make_cfg(**base, DAILY_LOSS_LIMIT_USD=0), start_ms),
+                                          list(arrs), make_cfg(**base, DAILY_LOSS_LIMIT_USD=0))
+    cfg = make_cfg(**base, DAILY_LOSS_LIMIT_USD=6.0)
+    res_on, _ = fast_backtest.run_single(_build_preps(arrs, cfg, start_ms), list(arrs), cfg)
+    DAY = 86_400_000
+    bad = 0
+    for t in res_on["trades"]:
+        d = t["open_time"] // DAY
+        realized = sum(x["pnl"] for x in res_on["trades"] if x["close_time"] // DAY == d and x["close_time"] <= t["open_time"])
+        if realized <= -6.0:
+            bad += 1
+    rej = sum(1 for x in res_on["signals"] if x["reason"] == "daily_loss_limit")
+    check(bad == 0, f"حد ضرر روزانه رعایت نشده ({bad})")
+    check(rej > 0 and len(res_on["trades"]) < len(res_off["trades"]), f"حد ضرر روزانه اثری نداشت ({rej})")
+    print(f"  ✓ {rej} سیگنال به‌خاطر حد ضرر روزانه رد شد ({len(res_off['trades'])} → {len(res_on['trades'])} معامله)")
+
+
 if __name__ == "__main__":
     t_start = time.time()
     test_strategy_equivalence()
@@ -417,6 +506,8 @@ if __name__ == "__main__":
     test_speed()
     test_money_management()
     test_htf_weighted()
+    test_live_process_bars()
+    test_daily_loss_limit()
     print()
     if FAILS:
         print(f"❌ {len(FAILS)} خطا")

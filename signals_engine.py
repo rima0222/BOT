@@ -26,7 +26,7 @@ import indicators as ind
 import market_data
 import money
 
-STRATEGY_NAMES = ["weighted_confluence", "box_breakout"]
+STRATEGY_NAMES = ["weighted_confluence", "box_breakout", "box_breakout@retest"]
 LONG, SHORT = 1, -1
 
 
@@ -174,9 +174,9 @@ def _support_resistance_arrays(c, h, l, sh_pos, sl_pos, a_h, b_h, a_l, b_l, clus
 
 class Structural:
     """کاندیدهای ساختاری یک شاخه (خرید یا فروش) — تنک، به‌همراه امتیاز هر کندل."""
-    __slots__ = ("idx", "sl", "level", "atr", "tp_uses_level", "score", "use_score")
+    __slots__ = ("idx", "sl", "level", "atr", "tp_uses_level", "score", "use_score", "entry")
 
-    def __init__(self, idx, sl, level, atr, tp_uses_level, score, use_score=True):
+    def __init__(self, idx, sl, level, atr, tp_uses_level, score, use_score=True, entry=None):
         self.idx = idx.astype(np.int64)
         self.sl = sl
         self.level = level
@@ -184,6 +184,7 @@ class Structural:
         self.tp_uses_level = tp_uses_level
         self.score = score
         self.use_score = use_score
+        self.entry = entry   # قیمت ورود (لیمیت پولبک)؛ None = قیمت بسته‌شدن کندل سیگنال
 
 
 def _prev(a):
@@ -217,8 +218,8 @@ def compute_structural(series, cfg, first_idx=0):
     out = {}
     if "weighted_confluence" in names:
         out["weighted_confluence"] = _structural_weighted(series, cfg, ctx)
-    if "box_breakout" in names:
-        out["box_breakout"] = _structural_breakout(series, cfg, ctx)
+    if any(n.startswith("box_breakout") for n in names):
+        out.update(_structural_breakout(series, cfg, ctx))
     return out
 
 
@@ -370,14 +371,26 @@ def _structural_breakout(series, cfg, ctx):
             sl_long = l - buf
             sl_short = h + buf
 
+        # ورود با پولبک: لیمیت روی سطح شکسته‌شده (+کمی فاصله، ولی نه بدتر از قیمت فعلی)
+        off = cfg.BRK_RETEST_OFFSET_ATR * atr
+        rsl = cfg.BRK_RETEST_SL_ATR * atr
+        lv_l = np.where(box_l, top, res_p)
+        lv_s = np.where(box_s, bot, sup_p)
+        ent_rl = np.minimum(lv_l + off, c)
+        ent_rs = np.maximum(lv_s - off, c)
+        sl_rl = lv_l - rsl
+        sl_rs = lv_s + rsl
+
     nan_lv = np.full(n, np.nan)
     nan_sc = np.full(n, np.nan)
 
-    def mk(mask, sl):
+    def mk(mask, sl, entry=None):
         idx = np.flatnonzero(mask)
-        return Structural(idx, sl[idx], nan_lv[idx], atr[idx], False, nan_sc[idx], use_score=False)
+        return Structural(idx, sl[idx], nan_lv[idx], atr[idx], False, nan_sc[idx], use_score=False,
+                          entry=None if entry is None else entry[idx])
 
-    return (mk(Lm, sl_long), mk(Sm, sl_short))
+    return {"box_breakout": (mk(Lm, sl_long), mk(Sm, sl_short)),
+            "box_breakout@retest": (mk(Lm, sl_rl, ent_rl), mk(Sm, sl_rs, ent_rs))}
 
 
 def finalize_vec(side, entry, sl, level, atr, tp_uses_level, min_rr, min_sl_pct, min_sl_atr, room, net=None):
@@ -417,15 +430,16 @@ def finalize_vec(side, entry, sl, level, atr, tp_uses_level, min_rr, min_sl_pct,
 
 class Finalized:
     """سیگنال نهایی (تنک، مرتب بر اساس ایندکس کندل)."""
-    __slots__ = ("idx", "side", "sl", "tp", "rr", "score")
+    __slots__ = ("idx", "side", "sl", "tp", "rr", "score", "entry")
 
-    def __init__(self, idx, side, sl, tp, rr, score):
+    def __init__(self, idx, side, sl, tp, rr, score, entry):
         self.idx, self.side, self.sl, self.tp, self.rr, self.score = idx, side, sl, tp, rr, score
+        self.entry = entry
 
     @staticmethod
     def empty():
         z = np.zeros(0)
-        return Finalized(np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int8), z, z, z, z)
+        return Finalized(np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int8), z, z, z, z, z)
 
 
 def finalize_strategy(structural_pair, close, variant):
@@ -435,7 +449,7 @@ def finalize_strategy(structural_pair, close, variant):
     for side, st in ((LONG, structural_pair[0]), (SHORT, structural_pair[1])):
         if len(st.idx) == 0:
             continue
-        entry = close[st.idx]
+        entry = close[st.idx] if st.entry is None else st.entry
         valid, sl, tp, rr = finalize_vec(side, entry, st.sl, st.level, st.atr, st.tp_uses_level,
                                          variant["min_rr"], variant["min_sl_pct"], variant["min_sl_atr"],
                                          variant["room"], variant.get("net"))
@@ -443,16 +457,15 @@ def finalize_strategy(structural_pair, close, variant):
             valid &= st.score >= min_score
         if valid.any():
             parts.append((st.idx[valid], np.full(int(valid.sum()), side, dtype=np.int8),
-                          sl[valid], tp[valid], rr[valid], st.score[valid]))
+                          sl[valid], tp[valid], rr[valid], st.score[valid], entry[valid]))
     if not parts:
         return Finalized.empty()
-    cols = [np.concatenate([p[i] for p in parts]) for i in range(6)]
-    idx, side, sl, tp, rr, score = cols
-    order = np.lexsort((-side, idx))
-    idx, side, sl, tp, rr, score = idx[order], side[order], sl[order], tp[order], rr[order], score[order]
+    cols = [np.concatenate([p[i] for p in parts]) for i in range(7)]
+    order = np.lexsort((-cols[1], cols[0]))
+    idx, side, sl, tp, rr, score, ent = [c[order] for c in cols]
     keep = np.ones(len(idx), dtype=bool)
     keep[1:] = idx[1:] != idx[:-1]
-    return Finalized(idx[keep], side[keep], sl[keep], tp[keep], rr[keep], score[keep])
+    return Finalized(idx[keep], side[keep], sl[keep], tp[keep], rr[keep], score[keep], ent[keep])
 
 
 def combine(finals, active, mode="any", lookback=8):
@@ -462,4 +475,4 @@ def combine(finals, active, mode="any", lookback=8):
     if f is None:
         return None
     return {"idx": f.idx, "side": f.side, "sl": f.sl, "tp": f.tp, "rr": f.rr, "score": f.score,
-            "label": [name] * len(f.idx)}
+            "entry": f.entry, "label": [name] * len(f.idx)}

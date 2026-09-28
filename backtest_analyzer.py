@@ -104,6 +104,7 @@ def analyze(conn, cfg, meta):
     losses = [t for t in trades if t["result"] == "LOSS"]
     trails = [t for t in trades if t["result"] == "TRAIL"]
     others = [t for t in trades if t["result"] == "OTHER"]
+    earlies = [t for t in trades if t["result"] == "EARLY"]
     rr_total = len(wins) + len(losses)
     win_rate = round(len(wins) / rr_total * 100, 2) if rr_total else 0.0
 
@@ -255,6 +256,9 @@ def analyze(conn, cfg, meta):
         if cfg.VIRTUAL_BALANCE_START else 0.0,
         "trail_positive": sum(1 for t in trails if t["pnl"] > 0),
         "other_trades": len(others), "other_pnl": round(sum(t["pnl"] for t in others), 2),
+        "early_trades": len(earlies), "early_pnl": round(sum(t["pnl"] for t in earlies), 2),
+        "early_pct": round(sum(t["pnl"] for t in earlies) / cfg.VIRTUAL_BALANCE_START * 100, 2)
+        if cfg.VIRTUAL_BALANCE_START else 0.0,
         "win_rate_95ci_pp": round(ci, 1) if ci else None,
         "profit_factor": profit_factor, "expectancy_per_trade": expectancy_per_trade,
         "avg_win": round(avg_win, 4), "avg_loss": round(avg_loss, 4),

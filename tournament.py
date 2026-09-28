@@ -25,10 +25,10 @@ import sim_engine
 
 STRATEGIES = ["box_breakout", "weighted_confluence"]
 STRATEGY_LABELS = {"box_breakout": "شکست باکس", "weighted_confluence": "ترکیبی وزن‌دار"}
-TRAIL_FA = {"tight": "تریلینگ حساس", "balanced": "تریلینگ متعادل", "loose": "تریلینگ پلکانی"}
+TRAIL_FA = {"strict": "تریلینگ سخت‌گیر", "tight": "تریلینگ حساس", "balanced": "تریلینگ متعادل", "loose": "تریلینگ پلکانی"}
 TF_LABELS = {"1m": "۱ دقیقه (اسکلپ)", "5m": "۵ دقیقه (اسکلپ)", "15m": "۱۵ دقیقه", "1h": "۱ ساعته", "4h": "۴ ساعته"}
 STRICT_FA = {"loose": "سبک‌گیر", "normal": "معمولی", "strict": "سخت‌گیر", "very_strict": "خیلی سخت‌گیر"}
-FLAG_DIMS = ("htf", "min_sl", "room", "btc_filter", "long_only")
+FLAG_DIMS = ("htf", "min_sl", "room", "btc_filter", "long_only", "retest", "early_exit", "daily_loss")
 
 
 def _strat(conf):
@@ -54,6 +54,12 @@ def describe(conf):
     if st == "weighted_confluence":
         parts.append(f"امتیاز ≥ {conf.get('min_score') or 70:g}")
     parts += [htf_txt, _trail_txt(conf["trailing"])]
+    if st == "box_breakout":
+        parts.append("ورود با پولبک" if conf.get("retest") else "ورود روی شکست")
+    if conf.get("early_exit"):
+        parts.append("خروج زودهنگام")
+    if conf.get("daily_loss"):
+        parts.append("حد ضرر روزانه")
     if conf["min_sl"]:
         parts.append("حداقل فاصله‌ی SL")
     if conf["room"]:
@@ -80,10 +86,11 @@ def evaluate(preps, order, cfg, conf, split_ms, record=False, merged_cache=None)
     ms = conf.get("min_score")
     variant = _variant(cfg, preset["MIN_RISK_REWARD"], conf["min_sl"], conf["room"],
                        cfg.WC_MIN_SCORE_PCT if ms is None else ms)
-    mkey = (tuple(conf["active_strategies"]), conf["combine_mode"], tuple(sorted(variant.items())))
+    active = _engine_active(conf)
+    mkey = (tuple(active), conf["combine_mode"], tuple(sorted(variant.items())))
     merged = merged_cache.get(mkey) if merged_cache is not None else None
     if merged is None:
-        cands = fast_backtest.candidates_for(preps, list(conf["active_strategies"]), conf["combine_mode"],
+        cands = fast_backtest.candidates_for(preps, active, conf["combine_mode"],
                                              variant, int(cfg.CONFIRM_LOOKBACK_BARS))
         merged = sim_engine.merge_candidates(cands, preps, order)
         if merged_cache is not None:
@@ -93,6 +100,11 @@ def evaluate(preps, order, cfg, conf, split_ms, record=False, merged_cache=None)
     P = sim_engine.SimParams(cfg, preset["HTF_MIN_AGREEMENT"], conf["trailing"], allow_long=True,
                              allow_short=not conf["long_only"], btc_filter=conf["btc_filter"])
     P.use_htf = bool(conf.get("htf", True))
+    if not conf.get("early_exit"):
+        P.early = None
+    elif P.early is None:
+        P.early = (int(cfg.EARLY_EXIT_BARS), float(cfg.EARLY_EXIT_MIN_R))
+    P.daily_loss = float(cfg.DAILY_LOSS_LIMIT_USD) if conf.get("daily_loss") else 0.0
     res = sim_engine.run_portfolio(merged, preps, order, P, record=record)
     sb = P.start_balance
     return res, {
@@ -102,12 +114,23 @@ def evaluate(preps, order, cfg, conf, split_ms, record=False, merged_cache=None)
     }
 
 
-def _conf(tf, strategy, min_score, strictness, htf, trailing, min_sl, room, btc, long_only):
-    """trailing: False یا اسم پروفایل تریلینگ. min_score فقط برای ترکیبی وزن‌دار (بقیه None)."""
+def _engine_active(conf):
+    st = _strat(conf)
+    if st == "box_breakout" and conf.get("retest"):
+        return ["box_breakout@retest"]
+    return [st]
+
+
+def _conf(tf, strategy, min_score, strictness, htf, trailing, min_sl, room, btc, long_only,
+          retest=False, early_exit=False, daily_loss=False):
+    """trailing: False یا اسم پروفایل تریلینگ. min_score فقط برای ترکیبی وزن‌دار (بقیه None).
+    retest فقط برای شکست باکس معنی داره."""
     return {"timeframe": tf, "active_strategies": [strategy], "combine_mode": "any",
             "min_score": float(min_score) if min_score is not None else None, "strictness": strictness,
             "htf": bool(htf), "trailing": trailing,
-            "min_sl": min_sl, "room": room, "btc_filter": btc, "long_only": long_only}
+            "min_sl": min_sl, "room": room, "btc_filter": btc, "long_only": long_only,
+            "retest": bool(retest) and strategy == "box_breakout", "early_exit": bool(early_exit),
+            "daily_loss": bool(daily_loss)}
 
 
 def _conf_key(c):
@@ -122,8 +145,8 @@ def _run_confs(preps, order, cfg, confs, split_ms, progress, done_offset, total_
         rr = presets[c["strictness"]]["MIN_RISK_REWARD"]
         return (rr, c["min_sl"], c["room"], c.get("min_score") or 0.0)
 
-    confs = sorted(confs, key=lambda c: (group_key(c), _strat(c), c["strictness"], str(c["trailing"]),
-                                         c["btc_filter"], c["long_only"]))
+    confs = sorted(confs, key=lambda c: (group_key(c), _strat(c), bool(c.get("retest")), c["strictness"],
+                                         str(c["trailing"]), c["btc_filter"], c["long_only"]))
     out = []
     merged_cache = {}
     current = None
@@ -172,12 +195,24 @@ def run_timeframe(preps, symbols, cfg, tf, start_ms, end_ms, grid="quick", progr
                  else [(True, "loose"), (True, "normal")]) + [(False, "normal")]
     trails = [False] + list(getattr(cfg, "TRAIL_PROFILES", {}) or [True])
     confs = []
-    for strat in STRATEGIES:
-        for sc in (scores if strat == "weighted_confluence" else [None]):
-            for htf, st in htf_modes:
-                for trailing in trails:
-                    for min_sl, room, btc, long_only in itertools.product((False, True), repeat=4):
-                        confs.append(_conf(tf, strat, sc, st, htf, trailing, min_sl, room, btc, long_only))
+    if grid == "focus":
+        # فقط شکست باکس؛ فیلترهای قدیمی خاموش؛ فقط گزینه‌های جدید با هم مقایسه می‌شن
+        for htf, st in [(True, "loose"), (True, "normal"), (False, "normal")]:
+            for trailing in trails:
+                for retest, early, daily in itertools.product((False, True), repeat=3):
+                    confs.append(_conf(tf, "box_breakout", None, st, htf, trailing, False, False, False, False,
+                                       retest, early, daily))
+    else:
+        d_retest = getattr(cfg, "BRK_ENTRY", "close") == "retest"
+        d_early = bool(getattr(cfg, "EARLY_EXIT", False))
+        d_daily = float(getattr(cfg, "DAILY_LOSS_LIMIT_USD", 0) or 0) > 0
+        for strat in STRATEGIES:
+            for sc in (scores if strat == "weighted_confluence" else [None]):
+                for htf, st in htf_modes:
+                    for trailing in trails:
+                        for min_sl, room, btc, long_only in itertools.product((False, True), repeat=4):
+                            confs.append(_conf(tf, strat, sc, st, htf, trailing, min_sl, room, btc, long_only,
+                                               d_retest, d_early, d_daily))
     total = len(confs)
     last = [0.0]
 
@@ -197,7 +232,8 @@ def run_timeframe(preps, symbols, cfg, tf, start_ms, end_ms, grid="quick", progr
         if conf.get("timeframe", "15m") != tf:
             continue
         try:
-            conf = {"min_score": cfg.WC_MIN_SCORE_PCT, **conf}
+            conf = {"min_score": cfg.WC_MIN_SCORE_PCT, "retest": False, "early_exit": False, "daily_loss": False,
+                    **conf}
             if _strat(conf) != "weighted_confluence":
                 conf["min_score"] = None
             _, m = evaluate(preps, order, cfg, conf, split_ms)
@@ -246,7 +282,7 @@ def write_results_csv(results, path):
         for r in sorted(results, key=lambda x: x["score"], reverse=True):
             c = r["config"]
             row = [c["timeframe"], _strat(c), c.get("min_score"), c["strictness"], c["trailing"] or "off",
-                   *[int(bool(c[d])) for d in FLAG_DIMS], int(r["eligible"]), int(r["oos_ok"]),
+                   *[int(bool(c.get(d))) for d in FLAG_DIMS], int(r["eligible"]), int(r["oos_ok"]),
                    round(r["score"], 4)]
             for s in segs:
                 row += [r[s].get(m) for m in mets]
@@ -301,7 +337,10 @@ def _paired_effects(results):
             ("min_sl", "حداقل فاصله‌ی حد ضرر"),
             ("room", "شرط فضای کافی تا هدف"),
             ("btc_filter", "فیلتر روند بیت‌کوین"),
-            ("long_only", "فقط خرید (حذف فروش)")]
+            ("long_only", "فقط خرید (حذف فروش)"),
+            ("retest", "ورود با پولبک (در برابر ورود روی کندل شکست)"),
+            ("early_exit", "خروج زودهنگام (اگه تا چند کندل جلو نرفت)"),
+            ("daily_loss", "حد ضرر روزانه")]
 
     def summarize(dim, label, pairs):
         d = [a["full"]["avg_r"] - b["full"]["avg_r"] for a, b in pairs]
@@ -316,7 +355,7 @@ def _paired_effects(results):
     for dim, label in dims:
         on, off = {}, {}
         for r in results:
-            (on if r["config"][dim] else off)[keyf(r["config"], dim)] = r
+            (on if r["config"].get(dim) else off)[keyf(r["config"], dim)] = r
         pairs = [(a, off[k]) for k, a in on.items()
                  if k in off and a["full"]["trades"] >= 10 and off[k]["full"]["trades"] >= 10]
         if pairs:

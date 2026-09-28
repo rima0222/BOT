@@ -139,6 +139,10 @@ class SymbolPrep:
 
     def finals(self, name, variant):
         uses_score = name == "weighted_confluence"
+        if name.endswith("@retest") and variant.get("net"):
+            # ورود پولبک همیشه لیمیته: کارمزد ورود = میکر (همون money.fee_fracs با ورود لیمیت)
+            net = variant["net"]
+            variant = dict(variant, net=(net[2], net[1], net[2]))
         key = (name, variant["min_rr"], variant["min_sl_pct"], variant["min_sl_atr"], variant["room"],
                variant.get("min_score", 0.0) if uses_score else None, variant.get("net"))
         f = self._finals.get(key)
@@ -276,7 +280,7 @@ def candidates_for(preps, active, mode, variant, lookback):
 def run_single(preps, symbols, cfg, record=True):
     """اجرای یک تنظیم کامل (برای بک‌تست تکی پنل) با ثبت همه‌ی سیگنال‌ها."""
     import strategies
-    active = [strategies.active_strategy(cfg)]
+    active = [strategies.engine_name(cfg)]
     variant = variant_from_cfg(cfg)
     cands = candidates_for(preps, active, cfg.STRATEGY_COMBINE_MODE, variant,
                            int(getattr(cfg, "CONFIRM_LOOKBACK_BARS", 8)))

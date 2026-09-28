@@ -83,6 +83,9 @@ def run_backtest(symbols, days, live_config, overrides=None, progress_cb=None, t
                                                 offline=os.environ.get("TRADINGBOT_OFFLINE") == "1")
     active = [a for a in cfg.ACTIVE_STRATEGIES]
     preps, sym_meta = fast_backtest.prepare_all(plan, data, symbols, cfg, cb, strategies_needed=active)
+    # منبع دیتای هر نماد (کدوم صرافی) — برای بررسی اعتبار
+    for sym, m in sym_meta.items():
+        m["exchange"] = (cache.index.get(cache._key(sym, cfg.TIMEFRAME)) or {}).get("exchange")
     del data
     cb("شبیه‌سازی سبد")
     res, P = fast_backtest.run_single(preps, symbols, cfg, record=True)

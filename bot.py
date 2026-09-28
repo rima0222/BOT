@@ -119,6 +119,10 @@ def get_bot_settings():
     except (TypeError, ValueError):
         risk_usd = float(config.RISK_USD)
     try:
+        daily_loss = float(paper_trader.get_setting(conn, "daily_loss", config.DAILY_LOSS_LIMIT_USD))
+    except (TypeError, ValueError):
+        daily_loss = float(config.DAILY_LOSS_LIMIT_USD)
+    try:
         min_score = float(paper_trader.get_setting(conn, "min_score", config.WC_MIN_SCORE_PCT))
     except (TypeError, ValueError):
         min_score = float(config.WC_MIN_SCORE_PCT)
@@ -160,6 +164,9 @@ def get_bot_settings():
         "trail_profile": trail_profile,
         "risk_usd": risk_usd,
         "risk_mode": config.RISK_MODE,
+        "retest": paper_trader.get_setting(conn, "brk_retest", "1" if config.BRK_ENTRY == "retest" else "0") == "1",
+        "early_exit": paper_trader.get_setting(conn, "early_exit", "1" if config.EARLY_EXIT else "0") == "1",
+        "daily_loss": daily_loss,
     }
 
 
@@ -168,7 +175,8 @@ def live_config_snapshot(settings=None):
     st = settings or get_bot_settings()
     return {"timeframe": st["timeframe"], "active_strategies": st["active_strategies"],
             "combine_mode": st["combine_mode"], "min_score": st["min_score"],
-            "trail_profile": st["trail_profile"],
+            "trail_profile": st["trail_profile"], "retest": st["retest"], "early_exit": st["early_exit"],
+            "daily_loss": st["daily_loss"] > 0,
             "strictness": st["strictness"], "trailing": st["trail_profile"] if st["trailing_enabled"] else False,
             "min_sl": st["min_sl"],
             "room": st["room"], "btc_filter": st["btc_filter"], "long_only": st["long_only"], "htf": st["htf"]}
@@ -220,6 +228,9 @@ def get_effective_cfg(settings):
         "ENTRY_MODE": settings["entry_mode"],
         "TRAIL_PROFILE": settings["trail_profile"],
         "RISK_USD": settings["risk_usd"],
+        "BRK_ENTRY": "retest" if settings["retest"] else "close",
+        "EARLY_EXIT": settings["early_exit"],
+        "DAILY_LOSS_LIMIT_USD": settings["daily_loss"],
     }
     # پروفایل تایم‌فریم انتخاب‌شده (تایم‌فریم‌های تایید، کول‌داون، حد زمانی، ...)
     cfg = fast_backtest.profile_cfg(config, settings["timeframe"])
@@ -346,6 +357,13 @@ def scan_symbol(symbol, settings):
         reject("cooldown")
         return
 
+    # ۱.۵) حد ضرر روزانه: اگه امروز (UTC) به اندازه‌ی حد، ضرر تحقق‌یافته داشتیم، تا فردا معامله‌ی جدید نه
+    if settings["daily_loss"] > 0:
+        day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        if paper_trader.realized_pnl_since(conn, day_start) <= -settings["daily_loss"]:
+            reject("daily_loss_limit")
+            return
+
     # ۲) جهت مجاز و فیلتر رژیم BTC (هر دو اختیاری، از پنل)
     if sig["side"] == "SHORT" and settings["long_only"]:
         reject("side_disabled")
@@ -372,7 +390,9 @@ def scan_symbol(symbol, settings):
 
     # ۴) ثبت سفارش (لیمیت در انتظار) یا ورود بازار — با رعایت سرمایه، لوریج ایمن و سقف تنوع
     tf_ms = market_data.TF_MS[cfg.TIMEFRAME]
-    entry_taker = settings["entry_mode"] == "market"
+    # ورود با پولبک همیشه لیمیته (روی سطح شکسته‌شده، با مهلت خودش)
+    entry_taker = settings["entry_mode"] == "market" and not sig.get("limit_only")
+    wait_bars = int(sig.get("wait_bars") or cfg.LIMIT_WAIT_BARS)
     entry_price = sig["entry"]
     if entry_taker:
         px = latest_1m_price(symbol)
@@ -394,7 +414,7 @@ def scan_symbol(symbol, settings):
         max_leverage=config.MAX_LEVERAGE, leverage_safety_mult=config.LEVERAGE_SAFETY_MULTIPLIER,
         position_pct_cap=config.MAX_POSITION_PCT_OF_CAPITAL,
         trailing_enabled=settings["trailing_enabled"], strategy_name=strategy_name,
-        pending=not entry_taker, expire_ts=candle_close_ms + cfg.LIMIT_WAIT_BARS * tf_ms,
+        pending=not entry_taker, expire_ts=candle_close_ms + wait_bars * tf_ms,
         entry_taker=entry_taker, max_hold_min=cfg.MAX_HOLD_MINUTES, timeframe=cfg.TIMEFRAME, score=score,
         risk_usd=settings["risk_usd"] if config.RISK_MODE == "usd" else None,
         fees=money.fee_fracs(config.MAKER_FEE_PCT, config.TAKER_FEE_PCT, config.TAKER_SLIPPAGE_PCT, entry_taker)[:2],
@@ -485,6 +505,8 @@ def price_check_job():
                 prof["ladder"], prof["beyond"],
                 config.MAKER_FEE_PCT, config.TAKER_FEE_PCT, config.TAKER_SLIPPAGE_PCT,
                 config.FUNDING_PCT_PER_8H, now_ms=now_ms, trail_floor=config.TRAIL_BREAKEVEN_FLOOR,
+                early_bars=config.EARLY_EXIT_BARS if settings["early_exit"] else 0,
+                early_min_r=config.EARLY_EXIT_MIN_R,
             )
         except Exception as e:
             log.warning(f"چک قیمت {symbol} با خطا مواجه شد: {e}")
@@ -586,6 +608,12 @@ def api_data():
         "strategy_labels": {k: v["short"] for k, v in strategies.STRATEGY_REGISTRY.items()},
         "risk_usd": settings["risk_usd"],
         "risk_mode": config.RISK_MODE,
+        "retest": settings["retest"],
+        "early_exit": settings["early_exit"],
+        "daily_loss": settings["daily_loss"],
+        "early_exit_bars": config.EARLY_EXIT_BARS,
+        "early_exit_min_r": config.EARLY_EXIT_MIN_R,
+        "retest_wait_bars": config.BRK_RETEST_WAIT_BARS,
         "htf_weighted": config.HTF_WEIGHTED,
         "btc_pair_weight": config.BTC_PAIR_WEIGHT,
         "breakout": {"box_bars": config.BRK_BOX_BARS, "vol_mult": config.BRK_VOL_MULT,
@@ -690,6 +718,19 @@ def api_control():
             log.info(f"[کنترل پنل] پروفایل تریلینگ: {body['trail_profile']}")
         else:
             return jsonify({"ok": False, "error": "پروفایل تریلینگ نامعتبر است"}), 400
+    for key, setting in (("retest", "brk_retest"), ("early_exit", "early_exit")):
+        if key in body:
+            paper_trader.set_setting(conn, setting, "1" if body[key] else "0")
+            log.info(f"[کنترل پنل] {key}: {'روشن' if body[key] else 'خاموش'}")
+    if "daily_loss" in body:
+        try:
+            dl = float(body["daily_loss"])
+            if not 0 <= dl <= 10000:
+                raise ValueError
+            paper_trader.set_setting(conn, "daily_loss", dl)
+            log.info(f"[کنترل پنل] حد ضرر روزانه: ${dl:g}" if dl else "[کنترل پنل] حد ضرر روزانه: خاموش")
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "حد ضرر روزانه نامعتبر است"}), 400
     if "risk_usd" in body:
         try:
             ru = float(body["risk_usd"])
@@ -885,7 +926,8 @@ def api_backtest_start():
         "ALLOW_LONG", "ALLOW_SHORT", "CONFIRM_LOOKBACK_BARS", "SHORT_EXTRA_HTF_AGREEMENT", "ENTRY_MODE",
         "WC_MIN_SCORE_PCT", "RISK_USD", "RISK_MODE", "TRAIL_PROFILE", "BTC_PAIR_WEIGHT", "HTF_WEIGHTED",
         "BRK_BOX_BARS", "BRK_BOX_MAX_ATR", "BRK_BOX_MIN_TOUCHES", "BRK_VOL_MULT", "BRK_MAX_EXT_ATR",
-        "BRK_MAIN_TREND", "BRK_SL_MODE", "BRK_USE_SR",
+        "BRK_MAIN_TREND", "BRK_SL_MODE", "BRK_USE_SR", "BRK_ENTRY", "BRK_RETEST_WAIT_BARS",
+        "EARLY_EXIT", "EARLY_EXIT_BARS", "EARLY_EXIT_MIN_R", "DAILY_LOSS_LIMIT_USD",
     }
     overrides = {k: v for k, v in overrides.items() if k in allowed_override_keys}
 
@@ -924,6 +966,15 @@ def api_backtest_start():
     if body.get("risk_usd") is not None:
         try:
             overrides["RISK_USD"] = max(0.5, min(1000.0, float(body["risk_usd"])))
+        except (TypeError, ValueError):
+            pass
+    if "retest" in body:
+        overrides["BRK_ENTRY"] = "retest" if body["retest"] else "close"
+    if "early_exit" in body:
+        overrides["EARLY_EXIT"] = bool(body["early_exit"])
+    if body.get("daily_loss") is not None:
+        try:
+            overrides["DAILY_LOSS_LIMIT_USD"] = max(0.0, float(body["daily_loss"]))
         except (TypeError, ValueError):
             pass
 
@@ -1043,7 +1094,7 @@ def api_compare_start():
     body = request.get_json(force=True, silent=True) or {}
     days = max(60, min(int(body.get("days", 365)), 1095))
     top_n = max(3, min(int(body.get("top_n", 20)), 60))
-    grid = "full" if body.get("grid") == "full" else "quick"
+    grid = body.get("grid") if body.get("grid") in ("full", "focus") else "quick"
     tfs = [t for t in (body.get("timeframes") or ["15m", "1h", "4h"]) if t in config.TIMEFRAME_PROFILES]
     if not tfs:
         return jsonify({"ok": False, "error": "حداقل یک تایم‌فریم انتخاب کن"}), 400
@@ -1062,7 +1113,8 @@ def api_compare_start():
                         "strictness": config.DEFAULT_STRICTNESS,
                         "trailing": config.DEFAULT_TRAIL_PROFILE if config.USE_TRAILING_SL else False,
                         "min_sl": False, "room": False, "btc_filter": False, "long_only": False,
-                        "htf": bool(config.USE_HTF_CONFIRMATION)}
+                        "htf": bool(config.USE_HTF_CONFIRMATION), "retest": config.BRK_ENTRY == "retest",
+                        "early_exit": bool(config.EARLY_EXIT), "daily_loss": config.DAILY_LOSS_LIMIT_USD > 0}
         with open(baseline_path, "w", encoding="utf-8") as f:
             json.dump([{"name": "تنظیمات فعلی ربات زنده", "config": live_conf},
                        {"name": "تنظیمات پیش‌فرض", "config": default_conf}], f, ensure_ascii=False)
@@ -1256,6 +1308,12 @@ def api_compare_apply():
     act = c.get("active_strategies") or []
     if act and act[0] in strategies.STRATEGY_REGISTRY:
         paper_trader.set_setting(conn, "strategy", act[0])
+    if "retest" in c:
+        paper_trader.set_setting(conn, "brk_retest", "1" if c["retest"] else "0")
+    if "early_exit" in c:
+        paper_trader.set_setting(conn, "early_exit", "1" if c["early_exit"] else "0")
+    if "daily_loss" in c:
+        paper_trader.set_setting(conn, "daily_loss", config.DAILY_LOSS_LIMIT_USD if c["daily_loss"] else 0)
     paper_trader.set_setting(conn, "min_sl", "1" if c.get("min_sl") else "0")
     paper_trader.set_setting(conn, "room_to_target", "1" if c.get("room") else "0")
     paper_trader.set_setting(conn, "btc_filter", "1" if c.get("btc_filter") else "0")

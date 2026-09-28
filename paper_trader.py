@@ -399,6 +399,8 @@ def result_of(exit_type):
         return "LOSS"
     if exit_type in ("TRAIL_SL", "BREAKEVEN"):
         return "TRAIL"
+    if exit_type == "EARLY":
+        return "EARLY"
     return "OTHER"
 
 
@@ -406,7 +408,7 @@ def classify_exit_level(kind, level, initial_sl, entry, trailing_enabled):
     """نوع خروج بر اساس «سطحی که فعال شد» (نه قیمت پرشده، که با گپ ممکنه فرق کنه)."""
     if kind == "TP":
         return "TP"
-    if kind in ("END", "TIME"):
+    if kind in ("END", "TIME", "EARLY"):
         return kind
     if not trailing_enabled:
         return "SL"
@@ -419,7 +421,7 @@ def classify_exit_level(kind, level, initial_sl, entry, trailing_enabled):
 
 def process_bars(conn, symbol, bars, start_balance, ladder, beyond_distance_r,
                  maker_fee_pct=0.0, taker_fee_pct=0.0, taker_slippage_pct=0.0, funding_pct_8h=0.0,
-                 now_ms=None, trail_floor=False):
+                 now_ms=None, trail_floor=False, early_bars=0, early_min_r=0.0):
     """
     ربات زنده: کندل‌های ۱ دقیقه‌ایِ بسته‌شده‌ی جدید رو روی سفارش‌ها/پوزیشن‌های این نماد
     اعمال می‌کنه — دقیقاً با همون قواعد موتور بک‌تست:
@@ -432,13 +434,16 @@ def process_bars(conn, symbol, bars, start_balance, ladder, beyond_distance_r,
     now_ms = now_ms if now_ms is not None else utc_ms(datetime.utcnow())
     rows = conn.execute(
         "SELECT id, side, entry, sl, tp, initial_sl, peak_price, size, trailing_enabled, open_time, last_bar_ts, "
-        "status, expire_ts, max_hold_min, fill_ts, entry_taker, notional "
+        "status, expire_ts, max_hold_min, fill_ts, entry_taker, notional, timeframe "
         "FROM trades WHERE symbol=? AND status IN ('OPEN','PENDING')", (symbol,)
     ).fetchall()
     if not rows:
         return
+    import market_data
     for (trade_id, side, entry, sl, tp, initial_sl, peak, size, trailing, open_time, last_bar_ts,
-         status, expire_ts, max_hold_min, fill_ts, entry_taker, notional) in rows:
+         status, expire_ts, max_hold_min, fill_ts, entry_taker, notional, timeframe) in rows:
+        tf_ms = market_data.TF_MS.get(timeframe or "", 0)
+        risk_unit = abs(entry - (initial_sl if initial_sl is not None else sl))
         trailing = bool(trailing)
         peak = peak if peak is not None else entry
         initial_sl = initial_sl if initial_sl is not None else sl
@@ -466,6 +471,15 @@ def process_bars(conn, symbol, bars, start_balance, ladder, beyond_distance_r,
             hit, price, kind, level, sl, peak = step_bar(side, entry, initial_sl, sl, tp, peak, trailing,
                                                          o, h, l, c, ladder, beyond_distance_r, floor)
             last_bar_ts = bar_open_ms
+            if not hit and not trailing:
+                # بیشترین سود دیده‌شده (برای خروج زودهنگام؛ با تریلینگ خود step_bar آپدیتش می‌کنه)
+                peak = max(peak, h) if side == "LONG" else min(peak, l)
+            # خروج زودهنگام: بعد از early_bars کندل تایم‌فریم اصلی، اگه هنوز early_min_r جلو نرفته
+            if not hit and early_bars and tf_ms and fill_ts and risk_unit > 0 \
+                    and bar_close_ms >= fill_ts + early_bars * tf_ms:
+                peak_r = (peak - entry) / risk_unit if side == "LONG" else (entry - peak) / risk_unit
+                if peak_r < early_min_r:
+                    hit, price, kind, level = True, c, "EARLY", None
             if not hit and max_hold_min and fill_ts and bar_close_ms >= fill_ts + max_hold_min * 60_000:
                 hit, price, kind, level = True, c, "TIME", None
             if hit:
@@ -686,6 +700,13 @@ def get_signal_log(conn, limit=100, offset=0, only_rejected=False):
 
 # ==================== آمار ====================
 
+def realized_pnl_since(conn, since_dt):
+    """جمع سود/زیان معاملات بسته‌شده از یک لحظه به بعد (برای حد ضرر روزانه؛ زمان‌ها UTC)."""
+    row = conn.execute("SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status='CLOSED' AND close_time >= ?",
+                       (since_dt.isoformat(),)).fetchone()
+    return float(row[0] or 0.0)
+
+
 def get_stats(conn, initial_capital=None):
     """
     آمار: برد و باخت فقط از معاملاتی که به هدف R:R (برد) یا حد ضرر اولیه (باخت) رسیدن.
@@ -694,7 +715,7 @@ def get_stats(conn, initial_capital=None):
     """
     closed = conn.execute("SELECT pnl, exit_type FROM trades WHERE status='CLOSED'").fetchall()
     total = len(closed)
-    groups = {"WIN": [], "LOSS": [], "TRAIL": [], "OTHER": []}
+    groups = {"WIN": [], "LOSS": [], "TRAIL": [], "EARLY": [], "OTHER": []}
     exit_type_counts = {}
     for pnl, et in closed:
         groups[result_of(et)].append(pnl or 0.0)
@@ -713,6 +734,8 @@ def get_stats(conn, initial_capital=None):
         "trail_pct": round(trail_pnl / cap * 100, 2) if cap else None,
         "trail_positive": sum(1 for p in groups["TRAIL"] if p > 0),
         "other_trades": len(groups["OTHER"]), "other_pnl": round(sum(groups["OTHER"]), 2),
+        "early_trades": len(groups["EARLY"]), "early_pnl": round(sum(groups["EARLY"]), 2),
+        "early_pct": round(sum(groups["EARLY"]) / cap * 100, 2) if cap else None,
         "exit_type_counts": exit_type_counts,
     }
 

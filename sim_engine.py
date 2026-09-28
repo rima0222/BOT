@@ -70,29 +70,54 @@ class PathSim:
             return s.o[k:k1], s.h[k:k1], s.l[k:k1], s.c[k:k1]
         return -s.o[k:k1], -s.l[k:k1], -s.h[k:k1], -s.c[k:k1]
 
-    def run(self, t0, side, entry, sl0, tp, trailing, max_bars=0, floor=None):
-        key = (t0, side, entry, sl0, tp, trailing, max_bars, floor)
+    def run(self, t0, side, entry, sl0, tp, trailing, max_bars=0, floor=None, early=None):
+        key = (t0, side, entry, sl0, tp, trailing, max_bars, floor, early)
         hit = self.cache.get(key)
         if hit is not None:
             return hit
-        res = self._run(t0, side, entry, sl0, tp, trailing, max_bars, floor)
+        res = self._run(t0, side, entry, sl0, tp, trailing, max_bars, floor, early)
         self.cache[key] = res
         return res
 
-    def _run(self, t0, side, entry, sl0, tp, trailing, max_bars=0, floor=None):
+    def _run(self, t0, side, entry, sl0, tp, trailing, max_bars=0, floor=None, early=None):
         """مدیریت از کندل t0+1. max_bars>0 یعنی حد زمانی: اگه تا اون تعداد کندل بسته نشد،
         در قیمت بسته شدن آخرین کندل مجاز با سفارش بازار بسته می‌شه (TIME).
-        floor: حد ضرر تریلینگ هیچ‌وقت عقب‌تر از این قیمت (سربه‌سر بعد از کارمزد) نمی‌ره."""
+        floor: حد ضرر تریلینگ هیچ‌وقت عقب‌تر از این قیمت (سربه‌سر بعد از کارمزد) نمی‌ره.
+        early: (N, min_r) — خروج زودهنگام: اگه بعد از N کندل بیشترین سود کمتر از min_r بوده،
+               با قیمت بسته‌شدن کندل Nام بسته می‌شه (EARLY)."""
         sgn = 1.0 if side == se.LONG else -1.0
         E, SL0, TP = sgn * entry, sgn * sl0, sgn * tp
         F = sgn * floor if floor is not None else None
         risk = abs(entry - sl0)
         n_all = self.s.n
         n = min(n_all, t0 + 1 + max_bars) if max_bars and max_bars > 0 else n_all
-        k = t0 + 1
-        cur_sl, peak = SL0, E
         pr = self.prof.get(trailing if isinstance(trailing, str) else True) if trailing else None
         trailing = bool(pr) and pr["has"] and risk > 0
+        st = {"sl": SL0, "peak": E}
+        k = t0 + 1
+        if early and early[0] > 0 and risk > 0:
+            k_mid = min(n, t0 + 1 + int(early[0]))
+            r = self._scan(k, k_mid, side, sgn, E, SL0, TP, risk, pr, F, trailing, st)
+            if r is not None:
+                return r
+            if k_mid == t0 + 1 + int(early[0]) and k_mid > k:
+                _, hh, _, _ = self._slices(side, k, k_mid)
+                best = max(float(hh.max()), E)   # مثل ربات زنده: بیشترین سود از قیمت ورود شروع می‌شه
+                if (best - E) / risk < early[1]:
+                    return (k_mid - 1, float(self.s.c[k_mid - 1]), "EARLY", None, sgn * max(best, st["peak"]))
+            k = k_mid
+        r = self._scan(k, n, side, sgn, E, SL0, TP, risk, pr, F, trailing, st)
+        if r is not None:
+            return r
+        peak = st["peak"]
+        if n < n_all:
+            return (n - 1, float(self.s.c[n - 1]), "TIME", None, sgn * peak)
+        # تا آخر دیتا باز مونده: با آخرین قیمت (به‌صورت سفارش بازار) بسته حساب می‌شه
+        return (n - 1, float(self.s.c[n - 1]), "END", None, sgn * peak)
+
+    def _scan(self, k, n, side, sgn, E, SL0, TP, risk, pr, F, trailing, st):
+        """کندل‌های [k, n) رو اعمال می‌کنه؛ اگه بسته شد نتیجه، وگرنه None (و وضعیت st آپدیت می‌شه)."""
+        cur_sl, peak = st["sl"], st["peak"]
         chunk = 48
         while k < n:
             k1 = min(n, k + chunk)
@@ -132,10 +157,8 @@ class PathSim:
                 peak, cur_sl = P[-1], SLk[-1]
             k = k1
             chunk = min(chunk * 4, 20000)
-        if n < n_all:
-            return (n - 1, float(self.s.c[n - 1]), "TIME", None, sgn * peak)
-        # تا آخر دیتا باز مونده: با آخرین قیمت (به‌صورت سفارش بازار) بسته حساب می‌شه
-        return (n - 1, float(self.s.c[n - 1]), "END", None, sgn * peak)
+        st["sl"], st["peak"] = cur_sl, peak
+        return None
 
 
 # ==================== سبد (پورتفو) ====================
@@ -180,7 +203,15 @@ class SimParams:
         self.max_hold_bars = int(math.ceil(hold_min * 60_000 / tf_ms)) if hold_min > 0 else 0
         self.funding_8h = float(getattr(cfg, "FUNDING_PCT_PER_8H", 0.0) or 0.0)
         self.fi, self.fs, self.fm = money.fee_fracs(self.maker, self.taker, self.slip, self.entry_mode == "market")
+        self.fi_limit = money.fee_fracs(self.maker, self.taker, self.slip, False)[0]
+        self.fi_market = money.fee_fracs(self.maker, self.taker, self.slip, True)[0]
         self.trail_floor = bool(getattr(cfg, "TRAIL_BREAKEVEN_FLOOR", False))
+        # ورود با پولبک (شکست باکس): همیشه لیمیت، با مهلت خودش
+        self.retest_wait = max(1, int(getattr(cfg, "BRK_RETEST_WAIT_BARS", 1)))
+        # خروج زودهنگام و حد ضرر روزانه
+        self.early = ((int(cfg.EARLY_EXIT_BARS), float(cfg.EARLY_EXIT_MIN_R))
+                      if getattr(cfg, "EARLY_EXIT", False) and int(getattr(cfg, "EARLY_EXIT_BARS", 0)) > 0 else None)
+        self.daily_loss = float(getattr(cfg, "DAILY_LOSS_LIMIT_USD", 0.0) or 0.0)
 
 
 def _tf_ms(tf):
@@ -257,7 +288,8 @@ def merge_candidates(per_symbol, preps, symbol_order):
         cols["sl"].append(cand["sl"])
         cols["tp"].append(cand["tp"])
         cols["rr"].append(cand["rr"])
-        cols["entry"].append(p.series.c[idx])
+        ent = cand.get("entry")
+        cols["entry"].append(p.series.c[idx] if ent is None else ent)
         cols["htf_l"].append(p.htf_long[idx])
         cols["htf_s"].append(p.htf_short[idx])
         cols["htf_wl"].append(p.htf_wlong[idx])
@@ -322,6 +354,8 @@ def run_portfolio(merged, preps, symbol_order, P, record=False):
     scores = merged["score"]
     labels = merged["label"]
 
+    day_pnl = {}   # سود/زیان تحقق‌یافته‌ی هر روز (UTC) برای حد ضرر روزانه
+
     def flush(until):
         nonlocal balance, locked
         while heap and heap[0][0] <= until:
@@ -332,6 +366,8 @@ def run_portfolio(merged, preps, symbol_order, P, record=False):
                 balance += pnl
                 last_close[sym_rank] = exit_t
                 equity.append((exit_t, balance))
+                d = int(exit_t // 86_400_000)
+                day_pnl[d] = day_pnl.get(d, 0.0) + pnl
 
     for j in iter_idx.tolist():
         T = int(times[j])
@@ -357,6 +393,12 @@ def run_portfolio(merged, preps, symbol_order, P, record=False):
                 sig["htf_agree"] = None
                 signals.append(sig)
             continue
+        if P.daily_loss > 0 and day_pnl.get(int(T // 86_400_000), 0.0) <= -P.daily_loss:
+            if record:
+                sig["reason"] = "daily_loss_limit"
+                sig["htf_agree"] = None
+                signals.append(sig)
+            continue
         if reason[j] != 0:
             if record:
                 sig["reason"] = static_reason[int(reason[j])]
@@ -370,7 +412,9 @@ def run_portfolio(merged, preps, symbol_order, P, record=False):
         t = int(t_idx[j])
         if t + 1 >= ser.n:
             continue   # سیگنال روی آخرین کندل دیتا؛ کندلی برای اجرا نمونده
-        entry_taker = P.entry_mode == "market"
+        retest = labels[j].endswith("@retest")
+        entry_taker = P.entry_mode == "market" and not retest
+        fi = P.fi_market if entry_taker else P.fi_limit
         if entry_taker:
             # ورود با سفارش بازار در قیمت باز شدن کندل بعد + اسلیپیج
             o_next = float(ser.o[t + 1])
@@ -388,7 +432,7 @@ def run_portfolio(merged, preps, symbol_order, P, record=False):
             side_str, entry, sl, P.risk_pct, balance, locked, len(open_by_sym),
             min_notional=P.min_notional, max_open_positions=P.max_open, max_leverage=P.max_leverage,
             leverage_safety_mult=P.lev_mult, position_pct_cap=P.pos_cap,
-            risk_usd=P.risk_usd, fees=(P.fi, P.fs),
+            risk_usd=P.risk_usd, fees=(fi, P.fs),
         )
         if not pos["ok"]:
             if record:
@@ -400,7 +444,7 @@ def run_portfolio(merged, preps, symbol_order, P, record=False):
             t0, fill_t = t, int(ser.close_ts[t])
         else:
             # سفارش لیمیت: فقط اگه قیمت در چند کندل بعد واقعاً از قیمت ورود رد بشه، پر می‌شه
-            k_end = min(ser.n - 1, t + P.limit_wait_bars)
+            k_end = min(ser.n - 1, t + (P.retest_wait if retest else P.limit_wait_bars))
             window = ser.l[t + 1:k_end + 1] < entry if side == se.LONG else ser.h[t + 1:k_end + 1] > entry
             if not window.any():
                 # پر نشد: مارجین و جای پوزیشن تا انقضای سفارش رزرو بود، بعد آزاد (بدون کول‌داون)
@@ -415,9 +459,9 @@ def run_portfolio(merged, preps, symbol_order, P, record=False):
             k_fill = t + 1 + int(np.argmax(window))
             t0, fill_t = k_fill - 1, int(ser.close_ts[k_fill - 1])
 
-        floor = money.breakeven_stop(side == se.LONG, entry, P.fi, P.fs) if (P.trailing and P.trail_floor) else None
+        floor = money.breakeven_stop(side == se.LONG, entry, fi, P.fs) if (P.trailing and P.trail_floor) else None
         exit_i, exit_price, kind, level, peak = prep.paths.run(t0, side, entry, sl, tp, P.trailing,
-                                                               P.max_hold_bars, floor)
+                                                               P.max_hold_bars, floor, P.early)
         exit_type = paper_trader.classify_exit_level(kind, level, sl, entry, P.trailing)
         size = pos["size"]
         gross = (exit_price - entry) * size if side == se.LONG else (entry - exit_price) * size
@@ -460,7 +504,7 @@ def metrics(trades, equity, start_balance, t_from=None, t_to=None):
         out.update({"win_rate": 0.0, "avg_r": 0.0, "r_lcb": -9.0, "profit_factor": 0.0, "pnl": 0.0,
                     "return_pct": 0.0, "max_dd_pct": 0.0, "pos_months_pct": 0.0, "fees": 0.0,
                     "long_trades": 0, "short_trades": 0, "avg_bars": 0.0, "wins": 0, "losses": 0,
-                    "trail_trades": 0, "trail_pnl": 0.0, "trail_pct": 0.0})
+                    "trail_trades": 0, "trail_pnl": 0.0, "trail_pct": 0.0, "early_trades": 0, "early_pnl": 0.0})
         return out
     rs = np.array([t["R"] for t in sel])
     pnls = np.array([t["pnl"] for t in sel])
@@ -469,6 +513,7 @@ def metrics(trades, equity, start_balance, t_from=None, t_to=None):
     wins = res_kind.count("WIN")
     losses = res_kind.count("LOSS")
     trail_pnl = float(sum(t["pnl"] for t, k in zip(sel, res_kind) if k == "TRAIL"))
+    early_pnl = float(sum(t["pnl"] for t, k in zip(sel, res_kind) if k == "EARLY"))
     gp = float(pnls[pnls > 0].sum())
     gl = float(-pnls[pnls < 0].sum())
     avg_r = float(rs.mean())
@@ -498,6 +543,7 @@ def metrics(trades, equity, start_balance, t_from=None, t_to=None):
         "win_rate": round(wins / (wins + losses) * 100, 2) if (wins + losses) else 0.0,
         "wins": wins, "losses": losses,
         "trail_trades": res_kind.count("TRAIL"), "trail_pnl": round(trail_pnl, 2),
+        "early_trades": res_kind.count("EARLY"), "early_pnl": round(early_pnl, 2),
         "trail_pct": round(trail_pnl / start_balance * 100, 2) if start_balance else 0.0,
         "avg_r": round(avg_r, 4),
         "r_lcb": round(lcb, 4),

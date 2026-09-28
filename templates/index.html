@@ -210,6 +210,7 @@
       <div class="card"><div class="label">باخت (حد ضرر)</div><div class="value red" id="lossesCount">—</div></div>
       <div class="card"><div class="label">درصد برد (فقط برد/باخت)</div><div class="value" id="winrate">—</div></div>
       <div class="card"><div class="label">بسته‌شده با تریلینگ (جدا از برد/باخت)</div><div class="value" id="trailStats" style="font-size:15px;">—</div></div>
+      <div class="card"><div class="label">خروج زودهنگام (جدا از برد/باخت)</div><div class="value" id="earlyStats" style="font-size:15px;">—</div></div>
       <div class="card"><div class="label">پوزیشن‌های باز</div><div class="value" id="openCount" dir="ltr" style="text-align:right;">—</div></div>
       <div class="card"><div class="label">سود/زیان تجمعی</div><div class="value" id="pnlTotal">—</div></div>
     </div>
@@ -272,6 +273,16 @@
         <label style="margin-right:14px;">حداقل امتیاز ورود:</label>
         <select id="minScoreSelect" style="width:110px;"></select></span>
         <span class="hint" id="brkInfo" style="display:none;"></span>
+      </div>
+      <div class="controls-row">
+        <label>ورود و خروج دقیق:</label>
+        <div class="opt-grid">
+          <label class="switch-label" title="بعد از شکست، به‌جای خرید فوری، سفارش لیمیت روی خود سطح شکسته‌شده گذاشته می‌شه و منتظر برگشت قیمت می‌مونه"><input type="checkbox" id="optRetest"> ورود با پولبک (شکست باکس) <span class="tip" id="retestTip"></span></label>
+          <label class="switch-label" title="اگه معامله بعد از چند کندل هنوز کمی هم به نفع ما نرفته، زودتر بسته می‌شه (ضرر کمتر از حد ضرر کامل)"><input type="checkbox" id="optEarly"> خروج زودهنگام <span class="tip" id="earlyTip"></span></label>
+        </div>
+        <label style="margin-right:14px;">حد ضرر روزانه ($، ۰ = خاموش):</label>
+        <input type="number" id="dailyLossInput" min="0" step="1" style="width:80px;">
+        <button id="saveDailyBtn" class="btn btn-save" style="padding:6px 12px;">ذخیره</button>
       </div>
       <div class="controls-row" style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border);">
         <label>فیلترها و بهبودها:</label>
@@ -435,8 +446,9 @@
       <div class="controls-row">
         <label>دامنه:</label>
         <select id="cmpGrid" style="width:260px;">
-          <option value="quick" selected>سریع — حدود ۴۰۰ تنظیم برای هر تایم‌فریم</option>
-          <option value="full">کامل — حدود ۲۵۰۰ تنظیم برای هر تایم‌فریم (خیلی طولانی‌تر)</option>
+          <option value="focus" selected>🎯 فقط استراتژی جدید (شکست باکس + گزینه‌های جدید) — ۱۲۰ تنظیم</option>
+          <option value="quick">سریع، هر دو استراتژی — حدود ۷۰۰ تنظیم برای هر تایم‌فریم</option>
+          <option value="full">کامل — چند هزار تنظیم برای هر تایم‌فریم (خیلی طولانی‌تر)</option>
         </select>
         <button id="cmpStartBtn" class="btn btn-save">▶ شروع مقایسه</button>
         <span id="cmpMsg" style="font-size:12px;"></span>
@@ -517,6 +529,14 @@
         <label style="margin-right:14px;">ضرر خالص هر معامله ($):</label>
         <input type="number" id="btRiskUsd" min="0.5" max="1000" step="0.5" style="width:80px;">
         <span class="hint">حد سود خالص = ۲ برابر (بعد از کارمزد)</span>
+        <label class="switch-label"><input type="checkbox" id="btRetest"> ورود با پولبک</label>
+        <label class="switch-label"><input type="checkbox" id="btEarly"> خروج زودهنگام</label>
+        <label>حد ضرر روزانه ($):</label>
+        <input type="number" id="btDailyLoss" min="0" step="1" style="width:70px;">
+      </div>
+      <div class="controls-row">
+        <button id="btNewOnlyBtn" class="btn btn-start" title="فقط شکست باکس + پولبک + تریلینگ سخت‌گیر + خروج زودهنگام + حد ضرر روزانه + تایید HTF وزن‌دار؛ بقیه‌ی فیلترها خاموش">🎯 تست فقط استراتژی جدید (با یک کلیک)</button>
+        <span class="hint">بقیه‌ی فیلترها و استراتژی قدیمی خاموش می‌شن؛ فقط تایم‌فریم، بازه و تعداد نماد از بالا گرفته می‌شه</span>
       </div>
       <div class="controls-row">
         <label>فیلترها:</label>
@@ -549,11 +569,13 @@
           <div class="card"><div class="label">تعداد معاملات</div><div class="value" id="btTotal">—</div></div>
           <div class="card"><div class="label">درصد برد (فقط برد/باخت ۲R)</div><div class="value" id="btWinRate">—</div></div>
           <div class="card"><div class="label">تریلینگ (جدا از برد/باخت)</div><div class="value" id="btTrail" style="font-size:15px;">—</div></div>
+          <div class="card"><div class="label">خروج زودهنگام (جدا از برد/باخت)</div><div class="value" id="btEarlyRes" style="font-size:15px;">—</div></div>
           <div class="card"><div class="label">Profit Factor</div><div class="value" id="btPF">—</div></div>
           <div class="card"><div class="label">بازده کل</div><div class="value" id="btReturn">—</div></div>
           <div class="card"><div class="label">بیشینه افت سرمایه</div><div class="value" id="btMaxDD">—</div></div>
           <div class="card"><div class="label">Sharpe (تخمینی)</div><div class="value" id="btSharpe">—</div></div>
         </div>
+        <div class="hint" id="btDataInfo" style="margin:8px 0;"></div>
         <div class="panel" style="background:#0a0e14;" id="btSegmentsBox">
           <div class="panel-head"><h2>ثبات در زمان: ۷۰٪ اول بازه در برابر ۳۰٪ آخر</h2><span class="hint">اگه فقط یکی خوب باشه، نتیجه احتمالاً شانسی/وابسته به یک دوره‌ی خاص بازاره</span></div>
           <table class="mini" id="btSegments"></table>
@@ -684,8 +706,13 @@ function resultBadge(result, et){
   if(result === 'WIN' || et === 'TP') return '<span class="badge win">برد</span>';
   if(result === 'LOSS' || et === 'SL') return '<span class="badge loss">باخت</span>';
   if(result === 'TRAIL' || et === 'TRAIL_SL' || et === 'BREAKEVEN') return '<span class="badge trail">تریلینگ</span>';
+  if(result === 'EARLY' || et === 'EARLY') return '<span class="badge breakeven">زودهنگام</span>';
   return '<span class="badge manual">سایر</span>';
 }
+
+const STRAT_FA = {weighted_confluence: 'ترکیبی وزن‌دار', box_breakout: 'شکست باکس', 'box_breakout@retest': 'شکست باکس (پولبک)'};
+function stratName(n){ return STRAT_FA[n] || n || '—'; }
+function htfTxt(v){ return (v === null || v === undefined) ? '—' : (v > 5 || window.__htfWeighted ? v + '٪' : v + '/5'); }
 
 function exitTypeBadge(et){
   const map = {
@@ -693,6 +720,7 @@ function exitTypeBadge(et){
     TRAIL_SL: ['تریلینگ', 'trail'], BREAKEVEN: ['سربه‌سر', 'breakeven'], MANUAL: ['دستی', 'manual'],
     END: ['پایان دیتا (باز مونده)', 'manual'], TIME: ['حد زمانی', 'breakeven'],
     CANCELLED: ['لغو (پر نشد)', 'manual'], MANUAL_CANCEL: ['لغو دستی', 'manual'],
+    EARLY: ['خروج زودهنگام', 'breakeven'],
   };
   const [label, cls] = map[et] || [et || '—', 'manual'];
   return `<span class="badge ${cls}">${label}</span>`;
@@ -733,7 +761,8 @@ document.getElementById('trailingToggle').addEventListener('change', async (e) =
   refresh();
 });
 
-const OPT_KEYS = {optHtf: 'htf', optMinSl: 'min_sl', optRoom: 'room', optBtc: 'btc_filter', optLongOnly: 'long_only'};
+const OPT_KEYS = {optHtf: 'htf', optMinSl: 'min_sl', optRoom: 'room', optBtc: 'btc_filter', optLongOnly: 'long_only',
+                  optRetest: 'retest', optEarly: 'early_exit'};
 Object.entries(OPT_KEYS).forEach(([id, key]) => {
   document.getElementById(id).addEventListener('change', async (e) => {
     await fetch('/api/control', {
@@ -758,6 +787,7 @@ document.getElementById('entryModeSelect').addEventListener('change', (e) => pos
 
 document.getElementById('minScoreSelect').addEventListener('change', (e) => postControl({min_score: parseFloat(e.target.value)}));
 document.getElementById('strategySelect').addEventListener('change', (e) => postControl({strategy: e.target.value}));
+document.getElementById('saveDailyBtn').addEventListener('click', () => postControl({daily_loss: parseFloat(document.getElementById('dailyLossInput').value) || 0}));
 document.getElementById('trailProfileSelect').addEventListener('change', (e) => postControl({trail_profile: e.target.value}));
 
 document.getElementById('resetCapitalBtn').addEventListener('click', async () => {
@@ -855,6 +885,9 @@ async function refresh(){
     document.getElementById('trailStats').innerHTML = tr.trail_trades
       ? `${tr.trail_trades} معامله · <span class="${tr.trail_pnl>=0?'green':'red'}" dir="ltr">${tr.trail_pnl>=0?'+':''}${fmt(tr.trail_pnl,2)}$ (${tr.trail_pct>=0?'+':''}${tr.trail_pct}%)</span>`
       : '۰';
+    document.getElementById('earlyStats').innerHTML = tr.early_trades
+      ? `${tr.early_trades} معامله · <span class="${tr.early_pnl>=0?'green':'red'}" dir="ltr">${tr.early_pnl>=0?'+':''}${fmt(tr.early_pnl,2)}$ (${tr.early_pct>=0?'+':''}${tr.early_pct}%)</span>`
+      : '۰';
     document.getElementById('openCount').innerText = `${data.open_positions_count} / ${data.max_open_positions}`;
     const pnlEl = document.getElementById('pnlTotal');
     pnlEl.innerText = (data.stats.total_pnl >= 0 ? '+' : '') + fmt(data.stats.total_pnl, 2) + ' $';
@@ -868,6 +901,7 @@ async function refresh(){
     document.getElementById('maxLev').innerText = data.max_leverage + 'x';
     document.getElementById('maxPosPct').innerText = data.max_position_pct + '%';
     document.getElementById('htfStatus').innerText = data.htf_enabled ? 'فعال' : 'خاموش (همه‌ی سیگنال‌ها بدون این فیلتر)';
+    window.__htfWeighted = !!data.htf_weighted;
     document.getElementById('htfReqText').innerHTML = data.htf_weighted
       ? `— وزن‌دار (تایم‌فریم بالاتر = وزن بیشتر${data.btc_pair_weight ? ` + نمودار ارز÷BTC با وزن ${data.btc_pair_weight}` : ''}) · خرید حداقل <b>${data.htf_min_agreement*20}٪</b>، فروش حداقل <b>${Math.min(100,(data.htf_min_agreement + data.short_extra_htf_agreement)*20)}٪</b> از وزن کل`
       : `(LONG حداقل <b>${data.htf_min_agreement}</b>، SHORT حداقل <b>${Math.min(5, data.htf_min_agreement + data.short_extra_htf_agreement)}</b> از ۵)`;
@@ -924,6 +958,9 @@ async function refresh(){
       if(document.activeElement.id !== id) document.getElementById(id).checked = !!data[key];
     });
     document.getElementById('optMinSlTip').innerText = `(حداقل ${data.test_min_sl_pct}٪ و ${data.test_min_sl_atr}×ATR)`;
+    document.getElementById('retestTip').innerText = `(مهلت ${data.retest_wait_bars} کندل)`;
+    document.getElementById('earlyTip').innerText = `(اگه تا ${data.early_exit_bars} کندل ${data.early_exit_min_r}R جلو نرفت)`;
+    if(document.activeElement.id !== 'dailyLossInput') document.getElementById('dailyLossInput').value = data.daily_loss;
 
 
     // پنل کنترل
@@ -977,7 +1014,7 @@ async function refresh(){
     closedBody.innerHTML = data.closed_trades.map(t => `
       <tr>
         <td>${t.symbol}</td><td>${sideBadge(t.side)}</td>
-        <td style="font-size:11px; color:var(--muted);">${t.strategy_name || '—'}</td>
+        <td style="font-size:11px; color:var(--muted);">${stratName(t.strategy_name)}</td>
         <td>${fmt(t.entry)}</td><td>${fmt(t.close_price)}</td>
         <td>${exitTypeBadge(t.exit_type)}</td>
         <td><span dir="ltr">${fmt(t.leverage,1)}x</span></td>
@@ -1026,7 +1063,7 @@ async function refreshSignalLog(){
         <td><b>${s.score != null ? s.score : '—'}</b></td>
         <td style="font-size:11px; color:var(--muted); white-space:normal; max-width:240px;">${s.reasons || '—'}</td>
         <td>${s.rr ? s.rr.toFixed(2) : '—'}</td>
-        <td dir="ltr">${s.htf_agree !== null ? s.htf_agree : '—'}</td>
+        <td dir="ltr">${htfTxt(s.htf_agree)}</td>
         <td>${s.opened
           ? '<span class="badge opened">اجرا شد</span>'
           : `<span class="badge rejected">رد شد (${s.rejection_reason || '—'})</span>`}</td>
@@ -1108,15 +1145,33 @@ async function initBacktestControls(){
       btTp.value = data.trail_profile;
       document.getElementById('btTrailing').checked = !!data.trailing_enabled;
       document.getElementById('btRiskUsd').value = data.risk_usd;
+      document.getElementById('btRetest').checked = !!data.retest;
+      document.getElementById('btEarly').checked = !!data.early_exit;
+      document.getElementById('btDailyLoss').value = data.daily_loss;
       btStrategyChanged();
     }
   }catch(e){ console.error(e); }
 }
 
 function btStrategyChanged(){
-  document.getElementById('btMinScoreBox').style.display =
-    document.getElementById('btStrategy').value === 'weighted_confluence' ? '' : 'none';
+  const wc = document.getElementById('btStrategy').value === 'weighted_confluence';
+  document.getElementById('btMinScoreBox').style.display = wc ? '' : 'none';
+  document.getElementById('btRetest').parentElement.style.display = wc ? 'none' : '';
 }
+document.getElementById('btNewOnlyBtn').addEventListener('click', () => {
+  // فقط استراتژی جدید با همه‌ی گزینه‌های جدیدش؛ فیلترهای قدیمی خاموش
+  document.getElementById('btStrategy').value = 'box_breakout';
+  document.getElementById('btRetest').checked = true;
+  document.getElementById('btEarly').checked = true;
+  if(!(parseFloat(document.getElementById('btDailyLoss').value) > 0)) document.getElementById('btDailyLoss').value = 15;
+  document.getElementById('btTrailing').checked = true;
+  document.getElementById('btTrailProfile').value = 'strict';
+  document.getElementById('btHtf').checked = true;
+  document.getElementById('btStrictness').value = 'normal';
+  ['btMinSl', 'btRoom', 'btBtc', 'btLongOnly'].forEach(id => document.getElementById(id).checked = false);
+  btStrategyChanged();
+  document.getElementById('btStartBtn').click();
+});
 document.getElementById('btStrategy').addEventListener('change', btStrategyChanged);
 
 document.getElementById('btStartBtn').addEventListener('click', async () => {
@@ -1141,6 +1196,9 @@ document.getElementById('btStartBtn').addEventListener('click', async () => {
       strategy: document.getElementById('btStrategy').value,
       trail_profile: document.getElementById('btTrailProfile').value,
       risk_usd: parseFloat(document.getElementById('btRiskUsd').value),
+      retest: document.getElementById('btRetest').checked,
+      early_exit: document.getElementById('btEarly').checked,
+      daily_loss: parseFloat(document.getElementById('btDailyLoss').value) || 0,
       overrides: { USE_TRAILING_SL: trailing },
     })
   });
@@ -1211,6 +1269,22 @@ function renderBacktestResult(r){
   document.getElementById('btTotal').innerText = ov.total_trades +
     (ov.win_rate_95ci_pp ? ` (±${ov.win_rate_95ci_pp}٪)` : '');
   document.getElementById('btWinRate').innerText = ov.win_rate + '%' + ` (${ov.wins}/${ov.rr_trades})`;
+  document.getElementById('btEarlyRes').innerHTML = ov.early_trades
+    ? `${ov.early_trades} معامله · <span class="${ov.early_pnl>=0?'green':'red'}" dir="ltr">${ov.early_pnl>=0?'+':''}${fmt(ov.early_pnl,2)}$ (${ov.early_pct>=0?'+':''}${ov.early_pct}%)</span>`
+    : '۰';
+  const sm = r.symbol_meta || {};
+  const okSyms = Object.values(sm).filter(m => m.ok);
+  const exCount = {};
+  okSyms.forEach(m => { const e = m.exchange || 'نامعلوم'; exCount[e] = (exCount[e] || 0) + 1; });
+  const covs = okSyms.map(m => (m.quality || {}).coverage_pct).filter(x => x != null);
+  const gaps = okSyms.reduce((a, m) => a + ((m.quality || {}).gaps || 0), 0);
+  const skipped = Object.entries(sm).filter(([k, m]) => !m.ok).map(([k]) => k);
+  document.getElementById('btDataInfo').innerHTML = okSyms.length
+    ? `📦 منبع و اعتبار دیتا: ${okSyms.length} نماد — ${Object.entries(exCount).map(([e, n]) => `${e} ×${n}`).join('، ')} · ` +
+      `کمترین پوشش کندل‌ها: ${covs.length ? Math.min(...covs) : '—'}٪ · وقفه‌ها: ${gaps}` +
+      (okSyms[0] && okSyms[0].from ? ` · از ${okSyms[0].from.slice(0, 10)} تا ${okSyms[0].to.slice(0, 10)}` : '') +
+      (skipped.length ? ` · کنار گذاشته‌شده (دیتای ناقص): ${skipped.join('، ')}` : '')
+    : '';
   document.getElementById('btTrail').innerHTML = ov.trail_trades
     ? `${ov.trail_trades} معامله · <span class="${ov.trail_pnl>=0?'green':'red'}" dir="ltr">${ov.trail_pnl>=0?'+':''}${fmt(ov.trail_pnl,2)}$ (${ov.trail_pct>=0?'+':''}${ov.trail_pct}%)</span>`
     : '۰';
@@ -1280,7 +1354,7 @@ async function loadBacktestTrades(page){
     document.querySelector('#btTradesTable tbody').innerHTML = data.trades.map(t => `
       <tr>
         <td>${t.symbol}</td><td>${sideBadge(t.side)}</td>
-        <td style="font-size:11px; color:var(--muted);">${t.strategy_name || '—'}</td>
+        <td style="font-size:11px; color:var(--muted);">${stratName(t.strategy_name)}</td>
         <td>${fmt(t.entry)}</td><td>${fmt(t.close_price)}</td>
         <td>${exitTypeBadge(t.exit_type)}</td>
         <td class="${t.pnl>=0?'green':'red'}">${t.pnl>=0?'+':''}${fmt(t.pnl,2)}</td>
@@ -1302,9 +1376,9 @@ async function loadBacktestSignals(page){
       <tr>
         <td>${s.time ? new Date(s.time+'Z').toLocaleString('fa-IR') : '—'}</td>
         <td>${s.symbol}</td><td>${sideBadge(s.side)}</td>
-        <td style="font-size:11px; color:var(--muted);">${s.strategy_name || '—'}</td>
+        <td style="font-size:11px; color:var(--muted);">${stratName(s.strategy_name)}</td>
         <td>${s.rr ? s.rr.toFixed(2) : '—'}</td>
-        <td dir="ltr">${s.htf_agree !== null && s.htf_agree !== undefined ? s.htf_agree + '/5' : '—'}</td>
+        <td dir="ltr">${htfTxt(s.htf_agree)}</td>
         <td><span class="badge rejected">${s.rejection_reason || '—'}</span></td>
       </tr>`).join('') || '<tr><td colspan="7" style="text-align:center; color:var(--muted);">سیگنال رد‌شده‌ای نیست</td></tr>';
     renderPager('btSignalsPager', data.page, data.page_size, data.total, loadBacktestSignals);
@@ -1438,6 +1512,9 @@ function backtestCompareConfig(source, idx){
   document.getElementById('btTrailing').checked = !!conf.trailing;
   if(typeof conf.trailing === 'string') document.getElementById('btTrailProfile').value = conf.trailing;
   if(conf.active_strategies && conf.active_strategies[0]) document.getElementById('btStrategy').value = conf.active_strategies[0];
+  if('retest' in conf) document.getElementById('btRetest').checked = !!conf.retest;
+  if('early_exit' in conf) document.getElementById('btEarly').checked = !!conf.early_exit;
+  if('daily_loss' in conf) document.getElementById('btDailyLoss').value = conf.daily_loss ? 15 : 0;
   btStrategyChanged();
   document.getElementById('btMinSl').checked = conf.min_sl;
   document.getElementById('btHtf').checked = conf.htf !== false;

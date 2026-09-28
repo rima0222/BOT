@@ -144,7 +144,27 @@ def generate_weighted_confluence(df, cfg):
     return res
 
 
-BREAKOUT_LABELS = {"box": "شکست باکس", "sr": "شکست حمایت/مقاومت", "vol": "حجم"}
+BREAKOUT_LABELS = {"box": "شکست باکس", "sr": "شکست حمایت/مقاومت", "vol": "حجم", "retest": "ورود با پولبک"}
+
+
+class LimitCfg:
+    """همون تنظیمات، ولی ورود همیشه لیمیت (برای حساب کارمزد ورود با پولبک که همیشه لیمیته)."""
+
+    def __init__(self, cfg):
+        self._cfg = cfg
+
+    def __getattr__(self, k):
+        if k == "ENTRY_MODE":
+            return "limit"
+        return getattr(self._cfg, k)
+
+
+def engine_name(cfg):
+    """اسم کلید موتور بک‌تست برای استراتژی فعال (شکست باکس با ورود پولبک کلید جدا داره)."""
+    name = active_strategy(cfg)
+    if name == "box_breakout" and getattr(cfg, "BRK_ENTRY", "close") == "retest":
+        return "box_breakout@retest"
+    return name
 
 
 def generate_box_breakout(df, cfg):
@@ -202,6 +222,10 @@ def generate_box_breakout(df, cfg):
     mode = getattr(cfg, "BRK_MAIN_TREND", "not_against")
     buf = atr * cfg.ATR_SL_BUFFER
     sl_mid = getattr(cfg, "BRK_SL_MODE", "candle") == "mid"
+    retest = getattr(cfg, "BRK_ENTRY", "close") == "retest"
+    off = cfg.BRK_RETEST_OFFSET_ATR * atr if retest else 0.0
+    rsl = cfg.BRK_RETEST_SL_ATR * atr if retest else 0.0
+    wait = int(getattr(cfg, "BRK_RETEST_WAIT_BARS", 1))
 
     def trend_ok(want, against):
         if mode == "with":
@@ -214,28 +238,40 @@ def generate_box_breakout(df, cfg):
         box_l = box_ok and c[-1] > top and c[-1] - top <= ext
         sr_l = use_sr and bool(res_p) and c[-1] > res_p and c[-1] - res_p <= ext
         if box_l or sr_l:
-            if sl_mid:
-                sl = ((top + bot) / 2.0 if box_l else res_p) - buf
+            if retest:
+                lv = top if box_l else res_p
+                sig = analysis.finalize_signal("LONG", min(lv + off, price), lv - rsl, None, atr, LimitCfg(cfg),
+                                               tp_uses_level=False)
             else:
-                sl = l[-1] - buf
-            sig = analysis.finalize_signal("LONG", price, sl, None, atr, cfg, tp_uses_level=False)
+                if sl_mid:
+                    sl = ((top + bot) / 2.0 if box_l else res_p) - buf
+                else:
+                    sl = l[-1] - buf
+                sig = analysis.finalize_signal("LONG", price, sl, None, atr, cfg, tp_uses_level=False)
             if sig:
                 why = (["box"] if box_l else []) + (["sr"] if sr_l else [])
-                sig.update({"score": None, "reasons": why + ["vol"], "vol_ratio": res["vol_ratio"]})
+                sig.update({"score": None, "reasons": why + ["vol"] + (["retest"] if retest else []),
+                            "vol_ratio": res["vol_ratio"], "limit_only": retest, "wait_bars": wait if retest else None})
                 res["signal"] = sig
                 return res
     if c[-1] < o[-1] and vol_ok and trend_ok("downtrend", "uptrend"):
         box_s = box_ok and c[-1] < bot and bot - c[-1] <= ext
         sr_s = use_sr and bool(sup_p) and c[-1] < sup_p and sup_p - c[-1] <= ext
         if box_s or sr_s:
-            if sl_mid:
-                sl = ((top + bot) / 2.0 if box_s else sup_p) + buf
+            if retest:
+                lv = bot if box_s else sup_p
+                sig = analysis.finalize_signal("SHORT", max(lv - off, price), lv + rsl, None, atr, LimitCfg(cfg),
+                                               tp_uses_level=False)
             else:
-                sl = h[-1] + buf
-            sig = analysis.finalize_signal("SHORT", price, sl, None, atr, cfg, tp_uses_level=False)
+                if sl_mid:
+                    sl = ((top + bot) / 2.0 if box_s else sup_p) + buf
+                else:
+                    sl = h[-1] + buf
+                sig = analysis.finalize_signal("SHORT", price, sl, None, atr, cfg, tp_uses_level=False)
             if sig:
                 why = (["box"] if box_s else []) + (["sr"] if sr_s else [])
-                sig.update({"score": None, "reasons": why + ["vol"], "vol_ratio": res["vol_ratio"]})
+                sig.update({"score": None, "reasons": why + ["vol"] + (["retest"] if retest else []),
+                            "vol_ratio": res["vol_ratio"], "limit_only": retest, "wait_bars": wait if retest else None})
                 res["signal"] = sig
     return res
 
