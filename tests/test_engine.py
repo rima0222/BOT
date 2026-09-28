@@ -444,12 +444,27 @@ def test_live_process_bars():
             early = (int(rng.integers(2, 8)), float(rng.choice([0.2, 0.3, 0.5])))
             fi, fs, _ = money.fee_fracs(mk, tk, sp, False)
             floor = money.breakeven_stop(side == 1, entry, fi, fs) if prof else None
-            r = sim._run(t0, side, entry, sl, tp, prof, 0, floor, early)
+            pending = rng.random() < 0.5
+            if pending:
+                # سفارش لیمیت: ورود کمی بهتر از قیمت فعلی، پر شدن فقط اگه قیمت ازش رد بشه (مثل run_portfolio)
+                entry = entry * (0.999 if side == 1 else 1.001)
+                sl = entry - dist if side == 1 else entry + dist
+                tp = entry + dist * 2.1 if side == 1 else entry - dist * 2.1
+                floor = money.breakeven_stop(side == 1, entry, fi, fs) if prof else None
+                wait = 30
+                win = s.l[t0 + 1:t0 + 1 + wait] < entry if side == 1 else s.h[t0 + 1:t0 + 1 + wait] > entry
+                if not win.any():
+                    continue
+                k_fill = t0 + 1 + int(np.argmax(win))
+                r = sim._run(k_fill - 1, side, entry, sl, tp, prof, 0, floor, early, fill_bar=True)
+            else:
+                r = sim._run(t0, side, entry, sl, tp, prof, 0, floor, early)
             conn = paper_trader.get_conn(":memory:")
             as_of = datetime.utcfromtimestamp(s.close_ts[t0] / 1000)
             paper_trader.open_trade(conn, "X/USDT", "LONG" if side == 1 else "SHORT", entry, sl, tp, 1.0, 1e9,
                                     min_notional=0, max_leverage=1, position_pct_cap=100, trailing_enabled=bool(prof),
-                                    as_of=as_of, timeframe="1m")
+                                    as_of=as_of, timeframe="1m", pending=pending,
+                                    expire_ts=int(s.close_ts[t0]) + 30 * 60_000 if pending else None)
             bars = [(int(s.ts[k]), s.o[k], s.h[k], s.l[k], s.c[k]) for k in range(t0 + 1, s.n)]
             paper_trader.process_bars(conn, "X/USDT", bars, 1e9, lad, bey, mk, tk, sp, 0.0,
                                       now_ms=int(s.close_ts[-1]), trail_floor=bool(prof),

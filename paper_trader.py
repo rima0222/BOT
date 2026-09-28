@@ -355,8 +355,8 @@ def step_bar(side, entry, initial_sl, sl, tp, peak, trailing, o, h, l, c, ladder
       ۱) اول حد ضرری که از قبل فعال بوده چک می‌شه. اگه قیمت باز شدن کندل از خودِ حد ضرر
          هم رد شده باشه (گپ)، خروج با قیمت باز شدن (بدتر از SL) حساب می‌شه.
       ۲) بدون تریلینگ: اگه همون کندل هم SL و هم TP رو لمس کرده، فرض می‌شه SL اول خورده.
-      ۳) با تریلینگ: بیشینه‌ی سود با سایه‌ی کندل آپدیت می‌شه؛ اگه SL جدید بالا رفت و
-         کندل پایین‌تر از اون بسته شد، یعنی قیمت بعد از سقف برگشته و به SL جدید خورده.
+      ۳) با تریلینگ: بیشینه‌ی سود با سایه‌ی کندل آپدیت می‌شه؛ اگه SL جدید بالا رفت و کف
+         همون کندل به SL جدید رسیده، فرض بدبینانه: قیمت بعد از سقف برگشته و به SL جدید خورده.
     خروجی: (بسته شد؟, قیمت خروج, نوع خروج 'STOP'/'TP', سطح فعال‌شده, sl جدید, peak جدید)
     """
     if side == "LONG":
@@ -369,7 +369,8 @@ def step_bar(side, entry, initial_sl, sl, tp, peak, trailing, o, h, l, c, ladder
             return False, None, None, None, sl, peak
         new_peak = max(peak, h)
         new_sl = max(compute_trailing_sl(entry, initial_sl, side, new_peak, ladder, beyond_distance_r, floor), sl)
-        if new_sl > sl and c <= new_sl:
+        # بدبینانه: اگه حد ضرر جدید بالا رفت و کف همین کندل به اون رسیده، فرض می‌شه بعد از سقف رسیده
+        if new_sl > sl and l <= new_sl:
             return True, new_sl, "STOP", new_sl, new_sl, new_peak
         return False, None, None, None, new_sl, new_peak
     else:
@@ -381,7 +382,7 @@ def step_bar(side, entry, initial_sl, sl, tp, peak, trailing, o, h, l, c, ladder
             return False, None, None, None, sl, peak
         new_peak = min(peak, l)
         new_sl = min(compute_trailing_sl(entry, initial_sl, side, new_peak, ladder, beyond_distance_r, floor), sl)
-        if new_sl < sl and c >= new_sl:
+        if new_sl < sl and h >= new_sl:
             return True, new_sl, "STOP", new_sl, new_sl, new_peak
         return False, None, None, None, new_sl, new_peak
 
@@ -468,12 +469,20 @@ def process_bars(conn, symbol, bars, start_balance, ladder, beyond_distance_r,
                     continue
                 status, fill_ts = "OPEN", bar_open_ms
                 conn.execute("UPDATE trades SET status='OPEN', fill_ts=? WHERE id=?", (fill_ts, trade_id))
-            hit, price, kind, level, sl, peak = step_bar(side, entry, initial_sl, sl, tp, peak, trailing,
-                                                         o, h, l, c, ladder, beyond_distance_r, floor)
+                # کندلی که سفارش لیمیت توش پر شده: سقف/کفش احتمالاً «قبل» از پر شدن بوده، پس فقط حد ضرر
+                # چک می‌شه (بدبینانه)؛ حد سود و تریلینگ و بیشترین سود از کندل بعد حساب می‌شن
+                if (l <= sl) if side == "LONG" else (h >= sl):
+                    gap = (o < sl) if side == "LONG" else (o > sl)
+                    hit, price, kind, level = True, (o if gap else sl), "STOP", sl
+                else:
+                    hit, price, kind, level = False, None, None, None
+            else:
+                hit, price, kind, level, sl, peak = step_bar(side, entry, initial_sl, sl, tp, peak, trailing,
+                                                             o, h, l, c, ladder, beyond_distance_r, floor)
+                if not hit and not trailing:
+                    # بیشترین سود دیده‌شده (برای خروج زودهنگام؛ با تریلینگ خود step_bar آپدیتش می‌کنه)
+                    peak = max(peak, h) if side == "LONG" else min(peak, l)
             last_bar_ts = bar_open_ms
-            if not hit and not trailing:
-                # بیشترین سود دیده‌شده (برای خروج زودهنگام؛ با تریلینگ خود step_bar آپدیتش می‌کنه)
-                peak = max(peak, h) if side == "LONG" else min(peak, l)
             # خروج زودهنگام: بعد از early_bars کندل تایم‌فریم اصلی، اگه هنوز early_min_r جلو نرفته
             if not hit and early_bars and tf_ms and fill_ts and risk_unit > 0 \
                     and bar_close_ms >= fill_ts + early_bars * tf_ms:

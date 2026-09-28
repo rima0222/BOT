@@ -70,16 +70,16 @@ class PathSim:
             return s.o[k:k1], s.h[k:k1], s.l[k:k1], s.c[k:k1]
         return -s.o[k:k1], -s.l[k:k1], -s.h[k:k1], -s.c[k:k1]
 
-    def run(self, t0, side, entry, sl0, tp, trailing, max_bars=0, floor=None, early=None):
-        key = (t0, side, entry, sl0, tp, trailing, max_bars, floor, early)
+    def run(self, t0, side, entry, sl0, tp, trailing, max_bars=0, floor=None, early=None, fill_bar=False):
+        key = (t0, side, entry, sl0, tp, trailing, max_bars, floor, early, fill_bar)
         hit = self.cache.get(key)
         if hit is not None:
             return hit
-        res = self._run(t0, side, entry, sl0, tp, trailing, max_bars, floor, early)
+        res = self._run(t0, side, entry, sl0, tp, trailing, max_bars, floor, early, fill_bar)
         self.cache[key] = res
         return res
 
-    def _run(self, t0, side, entry, sl0, tp, trailing, max_bars=0, floor=None, early=None):
+    def _run(self, t0, side, entry, sl0, tp, trailing, max_bars=0, floor=None, early=None, fill_bar=False):
         """مدیریت از کندل t0+1. max_bars>0 یعنی حد زمانی: اگه تا اون تعداد کندل بسته نشد،
         در قیمت بسته شدن آخرین کندل مجاز با سفارش بازار بسته می‌شه (TIME).
         floor: حد ضرر تریلینگ هیچ‌وقت عقب‌تر از این قیمت (سربه‌سر بعد از کارمزد) نمی‌ره.
@@ -95,14 +95,24 @@ class PathSim:
         trailing = bool(pr) and pr["has"] and risk > 0
         st = {"sl": SL0, "peak": E}
         k = t0 + 1
+        if fill_bar and k < n:
+            # کندل پر شدن سفارش لیمیت: فقط حد ضرر (سقف/کفش ممکنه قبل از پر شدن بوده) — مثل process_bars
+            oo, hh, ll, cc = self._slices(side, k, k + 1)
+            if ll[0] <= SL0:
+                price = oo[0] if oo[0] < SL0 else SL0
+                return (k, sgn * price, "STOP", sgn * SL0, sgn * E)
+            k += 1
+        k_first = k
         if early and early[0] > 0 and risk > 0:
             k_mid = min(n, t0 + 1 + int(early[0]))
-            r = self._scan(k, k_mid, side, sgn, E, SL0, TP, risk, pr, F, trailing, st)
+            r = self._scan(k, k_mid, side, sgn, E, SL0, TP, risk, pr, F, trailing, st) if k_mid > k else None
             if r is not None:
                 return r
-            if k_mid == t0 + 1 + int(early[0]) and k_mid > k:
-                _, hh, _, _ = self._slices(side, k, k_mid)
-                best = max(float(hh.max()), E)   # مثل ربات زنده: بیشترین سود از قیمت ورود شروع می‌شه
+            if k_mid == t0 + 1 + int(early[0]) and k_mid > t0 + 1:
+                best = E   # مثل ربات زنده: بیشترین سود از قیمت ورود شروع می‌شه (کندل پر شدن حساب نمی‌شه)
+                if k_mid > k_first:
+                    _, hh, _, _ = self._slices(side, k_first, k_mid)
+                    best = max(float(hh.max()), E)
                 if (best - E) / risk < early[1]:
                     return (k_mid - 1, float(self.s.c[k_mid - 1]), "EARLY", None, sgn * max(best, st["peak"]))
             k = k_mid
@@ -142,7 +152,7 @@ class PathSim:
                 SLprev[1:] = SLk[:-1]
                 c1 = ll <= SLprev
                 tph = hh >= TP          # حد سود R:R با تریلینگ هم فعاله
-                c2 = (SLk > SLprev) & (cc <= SLk)
+                c2 = (SLk > SLprev) & (ll <= SLk)   # بدبینانه: کف بعد از سقف (مثل step_bar)
                 hitm = c1 | tph | c2
                 if hitm.any():
                     i = int(np.argmax(hitm))
@@ -461,7 +471,8 @@ def run_portfolio(merged, preps, symbol_order, P, record=False):
 
         floor = money.breakeven_stop(side == se.LONG, entry, fi, P.fs) if (P.trailing and P.trail_floor) else None
         exit_i, exit_price, kind, level, peak = prep.paths.run(t0, side, entry, sl, tp, P.trailing,
-                                                               P.max_hold_bars, floor, P.early)
+                                                               P.max_hold_bars, floor, P.early,
+                                                               fill_bar=not entry_taker)
         exit_type = paper_trader.classify_exit_level(kind, level, sl, entry, P.trailing)
         size = pos["size"]
         gross = (exit_price - entry) * size if side == se.LONG else (entry - exit_price) * size

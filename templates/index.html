@@ -535,7 +535,7 @@
         <input type="number" id="btDailyLoss" min="0" step="1" style="width:70px;">
       </div>
       <div class="controls-row">
-        <button id="btNewOnlyBtn" class="btn btn-start" title="فقط شکست باکس + پولبک + تریلینگ سخت‌گیر + خروج زودهنگام + حد ضرر روزانه + تایید HTF وزن‌دار؛ بقیه‌ی فیلترها خاموش">🎯 تست فقط استراتژی جدید (با یک کلیک)</button>
+        <button id="btNewOnlyBtn" class="btn btn-start" title="فقط شکست باکس + پولبک + تریلینگ سخت‌گیر + خروج زودهنگام + حد ضرر روزانه + حداقل فاصله‌ی SL + تایید HTF وزن‌دار؛ بقیه‌ی فیلترها خاموش">🎯 تست فقط استراتژی جدید (با یک کلیک)</button>
         <span class="hint">بقیه‌ی فیلترها و استراتژی قدیمی خاموش می‌شن؛ فقط تایم‌فریم، بازه و تعداد نماد از بالا گرفته می‌شه</span>
       </div>
       <div class="controls-row">
@@ -1168,7 +1168,8 @@ document.getElementById('btNewOnlyBtn').addEventListener('click', () => {
   document.getElementById('btTrailProfile').value = 'strict';
   document.getElementById('btHtf').checked = true;
   document.getElementById('btStrictness').value = 'normal';
-  ['btMinSl', 'btRoom', 'btBtc', 'btLongOnly'].forEach(id => document.getElementById(id).checked = false);
+  document.getElementById('btMinSl').checked = true;   // حد ضرر خیلی نزدیک = کارمزد بیشتر از سود (طبق دیتای واقعی)
+  ['btRoom', 'btBtc', 'btLongOnly'].forEach(id => document.getElementById(id).checked = false);
   btStrategyChanged();
   document.getElementById('btStartBtn').click();
 });
