@@ -27,9 +27,9 @@ import signals_engine as se
 
 # ==================== مسیر یک معامله (وکتوریزه) ====================
 
-def _trail_vec(P, E, SL0, risk, trig_adj, locks, last_trigger, beyond, F=None):
+def _trail_vec(P, E, SL0, risk, trig_adj, locks, last_trigger, beyond, F=None, floor_r=None):
     """نسخه‌ی آرایه‌ای paper_trader.compute_trailing_sl برای خرید (فروش با قرینه‌سازی).
-    F: کف سربه‌سر بعد از کارمزد (قرینه‌شده برای فروش) یا None."""
+    F: کف سربه‌سر بعد از کارمزد (قرینه‌شده برای فروش) یا None. floor_r: کف فقط از این R سود به بعد."""
     peak_r = (P - E) / risk
     idx = np.searchsorted(trig_adj, peak_r, "right") - 1
     has = idx >= 0
@@ -38,7 +38,8 @@ def _trail_vec(P, E, SL0, risk, trig_adj, locks, last_trigger, beyond, F=None):
     locked = np.where(beyond_mask, np.maximum(locked, peak_r - beyond), locked)
     new_sl = E + locked * risk
     if F is not None:
-        new_sl = np.maximum(new_sl, np.minimum(F, P))
+        fmask = has if floor_r is None else (peak_r >= floor_r - 1e-9)
+        new_sl = np.where(fmask, np.maximum(new_sl, np.minimum(F, P)), new_sl)
     return np.where(has, np.maximum(new_sl, SL0), SL0)
 
 
@@ -51,16 +52,16 @@ class PathSim:
         self.s = series
         self.prof = {True: self._compile(ladder, beyond)}
         for name, pr in (profiles or {}).items():
-            self.prof[name] = self._compile(pr["ladder"], pr["beyond"])
+            self.prof[name] = self._compile(pr["ladder"], pr["beyond"], pr.get("floor_r"))
         self.cache = {}
 
     @staticmethod
-    def _compile(ladder, beyond):
+    def _compile(ladder, beyond, floor_r=None):
         lad = sorted(ladder, key=lambda x: x[0])
         return {"has": len(lad) > 0,
                 "trig_adj": np.array([t - 1e-9 for t, _ in lad], dtype=np.float64),
                 "locks": np.array([lk for _, lk in lad], dtype=np.float64),
-                "last_trigger": lad[-1][0] if lad else 0.0, "beyond": beyond}
+                "last_trigger": lad[-1][0] if lad else 0.0, "beyond": beyond, "floor_r": floor_r}
 
     def _slices(self, side, k, k1):
         """برش کندل‌ها؛ برای فروش قرینه می‌شن تا همون منطق خرید استفاده بشه
@@ -70,16 +71,16 @@ class PathSim:
             return s.o[k:k1], s.h[k:k1], s.l[k:k1], s.c[k:k1]
         return -s.o[k:k1], -s.l[k:k1], -s.h[k:k1], -s.c[k:k1]
 
-    def run(self, t0, side, entry, sl0, tp, trailing, max_bars=0, floor=None, early=None, fill_bar=False):
-        key = (t0, side, entry, sl0, tp, trailing, max_bars, floor, early, fill_bar)
+    def run(self, t0, side, entry, sl0, tp, trailing, max_bars=0, floor=None, early=None, fill_bar=False, cut=None):
+        key = (t0, side, entry, sl0, tp, trailing, max_bars, floor, early, fill_bar, cut)
         hit = self.cache.get(key)
         if hit is not None:
             return hit
-        res = self._run(t0, side, entry, sl0, tp, trailing, max_bars, floor, early, fill_bar)
+        res = self._run(t0, side, entry, sl0, tp, trailing, max_bars, floor, early, fill_bar, cut)
         self.cache[key] = res
         return res
 
-    def _run(self, t0, side, entry, sl0, tp, trailing, max_bars=0, floor=None, early=None, fill_bar=False):
+    def _run(self, t0, side, entry, sl0, tp, trailing, max_bars=0, floor=None, early=None, fill_bar=False, cut=None):
         """مدیریت از کندل t0+1. max_bars>0 یعنی حد زمانی: اگه تا اون تعداد کندل بسته نشد،
         در قیمت بسته شدن آخرین کندل مجاز با سفارش بازار بسته می‌شه (TIME).
         floor: حد ضرر تریلینگ هیچ‌وقت عقب‌تر از این قیمت (سربه‌سر بعد از کارمزد) نمی‌ره.
@@ -89,6 +90,9 @@ class PathSim:
         E, SL0, TP = sgn * entry, sgn * sl0, sgn * tp
         F = sgn * floor if floor is not None else None
         risk = abs(entry - sl0)
+        if cut and cut > 0 and risk > 0:
+            # بستن در ‎-cut×R: حد ضرر مؤثر بالاتر، ولی R (برای تریلینگ/خروج زودهنگام) همون ریسک اولیه
+            SL0 = max(SL0, E - cut * risk)
         n_all = self.s.n
         n = min(n_all, t0 + 1 + max_bars) if max_bars and max_bars > 0 else n_all
         pr = self.prof.get(trailing if isinstance(trailing, str) else True) if trailing else None
@@ -145,7 +149,8 @@ class PathSim:
                     return (k + i, sgn * price, "TP", sgn * TP, sgn * peak)
             else:
                 P = np.maximum(np.maximum.accumulate(hh), peak)
-                SLk = _trail_vec(P, E, SL0, risk, pr["trig_adj"], pr["locks"], pr["last_trigger"], pr["beyond"], F)
+                SLk = _trail_vec(P, E, SL0, risk, pr["trig_adj"], pr["locks"], pr["last_trigger"], pr["beyond"], F,
+                                 pr.get("floor_r"))
                 SLk = np.maximum.accumulate(np.maximum(SLk, cur_sl))
                 SLprev = np.empty_like(SLk)
                 SLprev[0] = cur_sl
@@ -222,6 +227,7 @@ class SimParams:
         self.early = ((int(cfg.EARLY_EXIT_BARS), float(cfg.EARLY_EXIT_MIN_R))
                       if getattr(cfg, "EARLY_EXIT", False) and int(getattr(cfg, "EARLY_EXIT_BARS", 0)) > 0 else None)
         self.daily_loss = float(getattr(cfg, "DAILY_LOSS_LIMIT_USD", 0.0) or 0.0)
+        self.cut = float(getattr(cfg, "CUT_LOSS_R", 0.0) or 0.0)
 
 
 def _tf_ms(tf):
@@ -437,7 +443,9 @@ def run_portfolio(merged, preps, symbol_order, P, record=False):
         if t + 1 >= ser.n:
             continue   # سیگنال روی آخرین کندل دیتا؛ کندلی برای اجرا نمونده
         retest = labels[j].endswith("@retest")
-        entry_taker = P.entry_mode == "market" and not retest
+        is_trend = labels[j].startswith("trend_follow")
+        # روندگیر: همیشه ورود بازار؛ پولبک: همیشه لیمیت
+        entry_taker = (P.entry_mode == "market" or is_trend) and not retest
         fi = P.fi_market if entry_taker else P.fi_limit
         if entry_taker:
             # ورود با سفارش بازار در قیمت باز شدن کندل بعد + اسلیپیج
@@ -483,11 +491,20 @@ def run_portfolio(merged, preps, symbol_order, P, record=False):
             k_fill = t + 1 + int(np.argmax(window))
             t0, fill_t = k_fill - 1, int(ser.close_ts[k_fill - 1])
 
-        floor = money.breakeven_stop(side == se.LONG, entry, fi, P.fs) if (P.trailing and P.trail_floor) else None
-        exit_i, exit_price, kind, level, peak = prep.paths.run(t0, side, entry, sl, tp, P.trailing,
+        # روندگیر همیشه با تریلینگ شاندلیر خودش مدیریت می‌شه (حد سود ثابت نداره)
+        trail = "trend" if is_trend else P.trailing
+        floor = money.breakeven_stop(side == se.LONG, entry, fi, P.fs) if (trail and P.trail_floor) else None
+        exit_i, exit_price, kind, level, peak = prep.paths.run(t0, side, entry, sl, tp, trail,
                                                                P.max_hold_bars, floor, P.early,
-                                                               fill_bar=not entry_taker)
-        exit_type = paper_trader.classify_exit_level(kind, level, sl, entry, P.trailing)
+                                                               fill_bar=not entry_taker, cut=P.cut or None)
+        cut_px = None
+        if P.cut:
+            rk = abs(entry - sl)
+            cut_px = entry - P.cut * rk if side == se.LONG else entry + P.cut * rk
+        if cut_px is not None and kind == "STOP" and level == cut_px:
+            exit_type = "CUT"
+        else:
+            exit_type = paper_trader.classify_exit_level(kind, level, sl, entry, bool(trail))
         size = pos["size"]
         gross = (exit_price - entry) * size if side == se.LONG else (entry - exit_price) * size
         fee, _, _, _ = paper_trader._fee_for_exit(entry, exit_price, size, exit_type, P.maker, P.taker, P.slip,

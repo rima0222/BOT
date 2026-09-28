@@ -172,6 +172,25 @@ def test_combined_live_wrapper():
         check(mism == 0, f"مسیر زنده {name}: {mism} عدم تطابق")
         check(checked > 5, f"مسیر زنده {name}: سیگنال خیلی کم ({checked})")
         print(f"  ✓ {name}: {checked} سیگنال")
+    # ترکیب چند استراتژی: اولویت با اولی
+    cfg = make_cfg(WC_MIN_SCORE_PCT=60, ACTIVE_STRATEGIES=["trend_follow", "weighted_confluence"])
+    W = cfg.CANDLE_LIMIT
+    st = se.compute_structural(series, cfg, 0)
+    prep = fast_backtest.SymbolPrep("T", series, st, None, None, None, 0, cfg)
+    v = fast_backtest.variant_from_cfg(cfg)
+    comb = se.combine({n: prep.finals(n, v) for n in strategies.engine_names(cfg)}, strategies.engine_names(cfg))
+    eng = {int(t): (lab, int(sd)) for t, sd, lab in zip(comb["idx"], comb["side"], comb["label"])}
+    mism, checked = 0, 0
+    for t in range(W + 10, series.n, 2):
+        live = strategies.generate_combined_signal(series.to_df(t - W - 9, t + 1), cfg).get("signal")
+        e = eng.get(t)
+        if (live is None) != (e is None) or (live and (live["strategy"] != e[0] or
+                                                       ("LONG" if e[1] == 1 else "SHORT") != live["side"])):
+            mism += 1
+        elif live:
+            checked += 1
+    check(mism == 0 and checked > 5, f"ترکیب استراتژی‌ها: {mism} عدم تطابق، {checked} سیگنال")
+    print(f"  ✓ ترکیب روندگیر + ترکیبی وزن‌دار: {checked} سیگنال")
 
 
 def test_htf_equivalence():
@@ -262,7 +281,9 @@ def _build_preps(arrs, cfg, start_ms, cut_ms=None):
 
 def test_no_lookahead_and_portfolio():
     for name, over in (("weighted_confluence", {}),
-                       ("box_breakout", {"BRK_MAIN_TREND": "off", "BRK_BOX_MAX_ATR": 6.0, "TRAIL_PROFILE": "tight"})):
+                       ("box_breakout", {"BRK_MAIN_TREND": "off", "BRK_BOX_MAX_ATR": 6.0, "TRAIL_PROFILE": "tight"}),
+                       ("trend_follow", {"CUT_LOSS_R": 0.6}),
+                       ("trend_follow+box_breakout", {"BRK_MAIN_TREND": "off", "BRK_BOX_MAX_ATR": 6.0})):
         _lookahead_and_portfolio(name, over)
 
 
@@ -271,7 +292,7 @@ def _lookahead_and_portfolio(name, over):
     arrs = {f"S{i}/USDT": synth(5000, seed=100 + i, price=10 + i * 7) for i in range(4)}
     cfg = make_cfg(WC_MIN_SCORE_PCT=50, HTF_TIMEFRAMES=["1h", "4h"], HTF_MIN_AGREEMENT=1,
                    SHORT_EXTRA_HTF_AGREEMENT=0, USE_TRAILING_SL=True, MAX_OPEN_POSITIONS=3,
-                   ACTIVE_STRATEGIES=[name], **over)
+                   ACTIVE_STRATEGIES=name.split("+"), **over)
     check(sim_engine.htf_required(4, 5, 1) == (4, 5) and sim_engine.htf_required(4, 3, 1) == (3, 3),
           "تبدیل سخت‌گیری HTF به تعداد تایم‌فریم اشتباهه")
     start_ms = int(arrs["S0/USDT"][400, 0])
@@ -311,16 +332,32 @@ def _lookahead_and_portfolio(name, over):
     print(f"  ✓ {len(res_full['trades'])} معامله، حداکثر {max_open} پوزیشن هم‌زمان")
     # حالت ورود بازار و حد زمانی هم اجرا بشن و معامله‌ی معتبر بدن
     cfg2 = make_cfg(WC_MIN_SCORE_PCT=50, HTF_TIMEFRAMES=["1h", "4h"], HTF_MIN_AGREEMENT=1, ENTRY_MODE="market",
-                    MAX_HOLD_MINUTES=180, ACTIVE_STRATEGIES=[name], **dict(over, BRK_ENTRY="close", EARLY_EXIT=False))
+                    MAX_HOLD_MINUTES=180, ACTIVE_STRATEGIES=name.split("+"),
+                    **dict(over, BRK_ENTRY="close", EARLY_EXIT=False))
     res_m, _ = fast_backtest.run_single(_build_preps(arrs, cfg2, start_ms), list(arrs), cfg2)
     types = {t["exit_type"] for t in res_m["trades"]}
     check(len(res_m["trades"]) > 20 and "TIME" in types, f"ورود بازار/حد زمانی کار نکرد: {len(res_m['trades'])} {types}")
     # R هر معامله = سود خالص ÷ ضرر خالص برنامه‌ریزی‌شده؛ باخت بدون گپ باید دقیقاً ۱R- باشه
     sl_r = [t["R"] for t in res_full["trades"] if t["exit_type"] == "SL"]
-    check(len(sl_r) > 0 and all(r <= -0.999 for r in sl_r), f"R باخت‌ها اشتباهه: {sl_r[:5]}")
+    check((len(sl_r) > 0 or over.get("CUT_LOSS_R")) and all(r <= -0.999 for r in sl_r),
+          f"R باخت‌ها اشتباهه: {sl_r[:5]}")
     tp_r = [t["R"] for t in res_full["trades"] if t["exit_type"] == "TP"]
     check(all(r >= 1.99 for r in tp_r), f"R بردها اشتباهه: {tp_r[:5]}")
-    tr_r = [t["R"] for t in res_full["trades"] if t["exit_type"] in ("TRAIL_SL", "BREAKEVEN")]
+    strat_names = {t["strategy"] for t in res_full["trades"]}
+    if "+" in name:
+        check(len(strat_names) >= 2, f"ترکیب استراتژی‌ها: فقط {strat_names}")
+    if "trend_follow" in name:
+        trend_tr = [t for t in res_full["trades"] if t["strategy"] == "trend_follow"]
+        check(all(t["exit_type"] != "TP" for t in trend_tr), "روندگیر نباید حد سود ثابت داشته باشه")
+        big = max((t["R"] for t in trend_tr), default=0)
+        print(f"  ✓ روندگیر: {len(trend_tr)} معامله، بزرگ‌ترین برد {big:.1f}R، انواع خروج "
+              f"{sorted({t['exit_type'] for t in trend_tr})}")
+    if over.get("CUT_LOSS_R"):
+        cuts = [t["R"] for t in res_full["trades"] if t["exit_type"] == "CUT"]
+        check(len(cuts) > 0 and all(-0.75 < r < -0.55 for r in cuts), f"بستن در ‎-0.6R اشتباهه: {cuts[:5]}")
+    # (روندگیر عمداً قبل از ۱R سود حد ضرر شاندلیرش می‌تونه زیر ورود باشه؛ اینجا فقط بقیه)
+    tr_r = [t["R"] for t in res_full["trades"] if t["exit_type"] in ("TRAIL_SL", "BREAKEVEN")
+            and not t["strategy"].startswith("trend_follow")]
     check(all(r > -0.2 for r in tr_r), f"تریلینگ با ضرر محسوس بسته شده: {sorted(tr_r)[:5]}")
     check(all(t["bars"] <= 12 + 1 for t in res_m["trades"] if t["exit_type"] != "END"), "حد زمانی رعایت نشده")
     print(f"  ✓ ورود بازار + حد زمانی: {len(res_m['trades'])} معامله، انواع خروج: {sorted(types)}")
@@ -430,10 +467,12 @@ def test_live_process_bars():
     rng = np.random.default_rng(4)
     mism, n = 0, 0
     kinds = set()
-    for prof in list(config.TRAIL_PROFILES) + [False]:
-        lad = config.TRAIL_PROFILES[prof]["ladder"] if prof else []
-        bey = config.TRAIL_PROFILES[prof]["beyond"] if prof else 0.5
-        sim = sim_engine.PathSim(s, lad, bey, config.TRAIL_PROFILES)
+    profiles = dict(config.TRAIL_PROFILES, trend=config.TREND_TRAIL)
+    for prof in list(profiles) + [False]:
+        lad = profiles[prof]["ladder"] if prof else []
+        bey = profiles[prof]["beyond"] if prof else 0.5
+        flr = profiles[prof].get("floor_r") if prof else None
+        sim = sim_engine.PathSim(s, lad, bey, profiles)
         for _ in range(120):
             t0 = int(rng.integers(10, s.n - 400))
             side = 1 if rng.random() < 0.5 else -1
@@ -444,6 +483,7 @@ def test_live_process_bars():
             early = (int(rng.integers(2, 8)), float(rng.choice([0.2, 0.3, 0.5])))
             fi, fs, _ = money.fee_fracs(mk, tk, sp, False)
             floor = money.breakeven_stop(side == 1, entry, fi, fs) if prof else None
+            cut = float(rng.choice([0.0, 0.0, 0.6]))
             pending = rng.random() < 0.5
             if pending:
                 # سفارش لیمیت: ورود کمی بهتر از قیمت فعلی، پر شدن فقط اگه قیمت ازش رد بشه (مثل run_portfolio)
@@ -456,25 +496,29 @@ def test_live_process_bars():
                 if not win.any():
                     continue
                 k_fill = t0 + 1 + int(np.argmax(win))
-                r = sim._run(k_fill - 1, side, entry, sl, tp, prof, 0, floor, early, fill_bar=True)
+                r = sim._run(k_fill - 1, side, entry, sl, tp, prof, 0, floor, early, fill_bar=True, cut=cut or None)
             else:
-                r = sim._run(t0, side, entry, sl, tp, prof, 0, floor, early)
+                r = sim._run(t0, side, entry, sl, tp, prof, 0, floor, early, cut=cut or None)
             conn = paper_trader.get_conn(":memory:")
             as_of = datetime.utcfromtimestamp(s.close_ts[t0] / 1000)
             paper_trader.open_trade(conn, "X/USDT", "LONG" if side == 1 else "SHORT", entry, sl, tp, 1.0, 1e9,
                                     min_notional=0, max_leverage=1, position_pct_cap=100, trailing_enabled=bool(prof),
                                     as_of=as_of, timeframe="1m", pending=pending,
+                                    strategy_name="trend_follow" if prof == "trend" else "x",
                                     expire_ts=int(s.close_ts[t0]) + 30 * 60_000 if pending else None)
             bars = [(int(s.ts[k]), s.o[k], s.h[k], s.l[k], s.c[k]) for k in range(t0 + 1, s.n)]
-            paper_trader.process_bars(conn, "X/USDT", bars, 1e9, lad, bey, mk, tk, sp, 0.0,
+            paper_trader.process_bars(conn, "X/USDT", bars, 1e9, lad if prof != "trend" else [], bey, mk, tk, sp, 0.0,
                                       now_ms=int(s.close_ts[-1]), trail_floor=bool(prof),
-                                      early_bars=early[0], early_min_r=early[1])
+                                      early_bars=early[0], early_min_r=early[1],
+                                      profiles={"trend_follow": (lad, bey, flr)}, cut_r=cut)
             row = conn.execute("SELECT close_price, exit_type, close_time FROM trades").fetchone()
             n += 1
             if r[2] == "END":
                 ok = row[1] is None
             else:
-                exp_type = paper_trader.classify_exit_level(r[2], r[3], sl, entry, bool(prof))
+                cut_px = (entry - cut * dist if side == 1 else entry + cut * dist) if cut else None
+                exp_type = ("CUT" if (cut_px is not None and r[2] == "STOP" and close_enough(r[3], cut_px, 1e-12))
+                            else paper_trader.classify_exit_level(r[2], r[3], sl, entry, bool(prof)))
                 exp_close = datetime.utcfromtimestamp(s.close_ts[r[0]] / 1000).isoformat()
                 ok = (row[1] == exp_type and close_enough(row[0], r[1], 1e-12) and row[2] == exp_close)
                 kinds.add(exp_type)
@@ -483,7 +527,7 @@ def test_live_process_bars():
                 if mism <= 5:
                     check(False, f"process_bars t0={t0} side={side} prof={prof} early={early}: موتور={r[:4]} زنده={row}")
     check(mism == 0, f"process_bars: {mism} عدم تطابق از {n}")
-    check({"EARLY", "SL", "TP"} <= kinds, f"انواع خروج کافی تست نشد: {kinds}")
+    check({"EARLY", "SL", "TP", "CUT", "TRAIL_SL"} <= kinds, f"انواع خروج کافی تست نشد: {kinds}")
     print(f"  ✓ {n} معامله، انواع خروج: {sorted(kinds)}")
 
 

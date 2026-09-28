@@ -144,7 +144,8 @@ def generate_weighted_confluence(df, cfg):
     return res
 
 
-BREAKOUT_LABELS = {"box": "شکست باکس", "sr": "شکست حمایت/مقاومت", "vol": "حجم", "retest": "ورود با پولبک"}
+BREAKOUT_LABELS = {"box": "شکست باکس", "sr": "شکست حمایت/مقاومت", "vol": "حجم", "retest": "ورود با پولبک",
+                   "trend_breakout": "شکست سقف/کف ۲۰ کندل هم‌جهت روند (روندگیر)"}
 
 
 class LimitCfg:
@@ -161,10 +162,7 @@ class LimitCfg:
 
 def engine_name(cfg):
     """اسم کلید موتور بک‌تست برای استراتژی فعال (شکست باکس با ورود پولبک کلید جدا داره)."""
-    name = active_strategy(cfg)
-    if name == "box_breakout" and getattr(cfg, "BRK_ENTRY", "close") == "retest":
-        return "box_breakout@retest"
-    return name
+    return engine_key(active_strategy(cfg), cfg)
 
 
 def generate_box_breakout(df, cfg):
@@ -276,6 +274,72 @@ def generate_box_breakout(df, cfg):
     return res
 
 
+class TrendCfg:
+    """تنظیمات روندگیر: حد سود عملاً غیرفعال (TR_TP_R) و ورود همیشه بازار (برای حساب کارمزد)."""
+
+    def __init__(self, cfg):
+        self._cfg = cfg
+
+    def __getattr__(self, k):
+        if k == "ENTRY_MODE":
+            return "market"
+        if k == "MIN_RISK_REWARD":
+            return self._cfg.TR_TP_R
+        return getattr(self._cfg, k)
+
+
+def generate_trend_follow(df, cfg):
+    """
+    روندگیر: شکست سقف/کف TR_BREAKOUT_BARS کندل اخیر با کندل بسته‌شده (اولین بسته‌شدن بیرون)،
+    هم‌جهت با میانگین TR_MA و روند داو (خلاف جهت نباشه). حد ضرر TR_SL_ATR×ATR؛ بدون حد سود ثابت
+    (خروج با تریلینگ شاندلیر config.TREND_TRAIL). ورود با سفارش بازار.
+    """
+    name = "trend_follow"
+    price = float(df["close"].iloc[-1])
+    res = {"trend": "sideways", "price": price, "support": None, "resistance": None, "atr": None,
+           "signal": None, "strategy": name}
+    N = int(cfg.TR_BREAKOUT_BARS)
+    if len(df) < max(30, N + 2):
+        return res
+    swing_highs, swing_lows = analysis.find_swings(df, order=cfg.SWING_ORDER)
+    trend = analysis.determine_trend(swing_highs, swing_lows)
+    support, resistance = analysis.get_support_resistance(swing_highs, swing_lows, price, cfg.SR_CLUSTER_PCT)
+    res.update({"trend": trend, "support": support, "resistance": resistance})
+    atr = analysis.compute_atr(df, cfg.ATR_PERIOD).iloc[-1]
+    if pd.isna(atr) or atr <= 0:
+        return res
+    atr = float(atr)
+    res["atr"] = atr
+    o = df["open"].values.astype(float)
+    h = df["high"].values.astype(float)
+    l = df["low"].values.astype(float)
+    c = df["close"].values.astype(float)
+    v = df["volume"].values.astype(float)
+    top_s = indicators.prev_max(h, N)
+    bot_s = indicators.prev_min(l, N)
+    top, bot, top_p, bot_p = top_s[-1], bot_s[-1], top_s[-2], bot_s[-2]
+    ma = indicators.sma(c, int(cfg.TR_MA))[-1]
+    vm = float(getattr(cfg, "TR_VOL_MULT", 0.0) or 0.0)
+    if vm > 0:
+        va = float(indicators.prev_mean(v, N)[-1])
+        vol_ok = va > 0 and v[-1] >= vm * va
+    else:
+        vol_ok = True
+    dist = cfg.TR_SL_ATR * atr
+    if c[-1] > o[-1] and c[-1] > top and c[-2] <= top_p and c[-1] > ma and trend != "downtrend" and vol_ok:
+        sig = analysis.finalize_signal("LONG", price, price - dist, None, atr, TrendCfg(cfg), tp_uses_level=False)
+        if sig:
+            sig.update({"score": None, "reasons": ["trend_breakout"], "market_only": True})
+            res["signal"] = sig
+            return res
+    if c[-1] < o[-1] and c[-1] < bot and c[-2] >= bot_p and c[-1] < ma and trend != "uptrend" and vol_ok:
+        sig = analysis.finalize_signal("SHORT", price, price + dist, None, atr, TrendCfg(cfg), tp_uses_level=False)
+        if sig:
+            sig.update({"score": None, "reasons": ["trend_breakout"], "market_only": True})
+            res["signal"] = sig
+    return res
+
+
 STRATEGY_REGISTRY = {
     "weighted_confluence": {
         "fn": generate_weighted_confluence,
@@ -287,12 +351,46 @@ STRATEGY_REGISTRY = {
         "label": "شکست باکس و حمایت/مقاومت (با کندل بسته + تایید حجم + روند داو)",
         "short": "شکست باکس",
     },
+    "trend_follow": {
+        "fn": generate_trend_follow,
+        "label": "روندگیر: شکست سقف/کف ۲۰ کندل، بدون سقف سود، تریلینگ شاندلیر",
+        "short": "روندگیر",
+    },
 }
+
+# ترکیب‌های آماده (چند استراتژی با هم؛ اولی اولویت داره اگه هم‌زمان سیگنال بدن)
+STRATEGY_COMBOS = {
+    "trend_follow+box_breakout": "ترکیب: روندگیر + شکست باکس",
+    "trend_follow+weighted_confluence": "ترکیب: روندگیر + ترکیبی وزن‌دار",
+    "trend_follow+box_breakout+weighted_confluence": "ترکیب: هر سه استراتژی",
+}
+
+
+def parse_strategy(value):
+    """«a+b» → [a, b] (فقط استراتژی‌های معتبر)."""
+    names = [x for x in str(value or "").split("+") if x in STRATEGY_REGISTRY]
+    return names or ["box_breakout"]
 
 
 def active_strategy(cfg):
     act = list(getattr(cfg, "ACTIVE_STRATEGIES", []) or [])
     return act[0] if act and act[0] in STRATEGY_REGISTRY else "weighted_confluence"
+
+
+def active_strategies(cfg):
+    act = [a for a in (getattr(cfg, "ACTIVE_STRATEGIES", []) or []) if a in STRATEGY_REGISTRY]
+    return act or ["weighted_confluence"]
+
+
+def engine_key(name, cfg):
+    if name == "box_breakout" and getattr(cfg, "BRK_ENTRY", "close") == "retest":
+        return "box_breakout@retest"
+    return name
+
+
+def engine_names(cfg):
+    """کلیدهای موتور بک‌تست برای همه‌ی استراتژی‌های فعال (به ترتیب اولویت)."""
+    return [engine_key(n, cfg) for n in active_strategies(cfg)]
 
 
 def reason_labels(reasons):
@@ -314,11 +412,21 @@ def generate_combined_signal(df, cfg):
     """اجرای استراتژی روی آخرین پنجره‌ی CANDLE_LIMIT کندلی (دقیقاً مثل موتور بک‌تست)."""
     size = getattr(cfg, "CANDLE_LIMIT", len(df))
     window = _window(df, 0, size)
-    name = active_strategy(cfg)
-    try:
-        r = STRATEGY_REGISTRY[name]["fn"](window, cfg)
-    except Exception:
-        r = None
+    # چند استراتژی فعال: به ترتیب اولویت؛ اولین سیگنال برنده‌ست (مثل موتور بک‌تست)
+    r = None
+    name = None
+    for nm in active_strategies(cfg):
+        try:
+            rr = STRATEGY_REGISTRY[nm]["fn"](window, cfg)
+        except Exception:
+            rr = None
+        if rr is None:
+            continue
+        if r is None:
+            r, name = rr, nm
+        if rr.get("signal"):
+            r, name = rr, nm
+            break
     if not r:
         return {"trend": "sideways", "price": float(df["close"].iloc[-1]), "support": None,
                 "resistance": None, "atr": None, "signal": None, "strategy": None}

@@ -16,6 +16,7 @@ import time
 import numpy as np
 
 import market_data
+import money
 import sim_engine
 import signals_engine as se
 
@@ -132,9 +133,16 @@ class SymbolPrep:
         self.htf_wshort = htf_wshort if htf_wshort is not None else np.zeros(series.n)
         self.btc_trend = btc_trend
         self.first_idx = first_idx
+        profiles = dict(getattr(cfg, "TRAIL_PROFILES", None) or {})
+        if getattr(cfg, "TREND_TRAIL", None):
+            profiles["trend"] = cfg.TREND_TRAIL
         self.paths = sim_engine.PathSim(series, getattr(cfg, "TRAILING_SL_LADDER", []),
-                                        getattr(cfg, "TRAILING_SL_BEYOND_DISTANCE_R", 0.6),
-                                        getattr(cfg, "TRAIL_PROFILES", None))
+                                        getattr(cfg, "TRAILING_SL_BEYOND_DISTANCE_R", 0.6), profiles)
+        # کارمزد ورود بازار (برای روندگیر) و حد سود «بی‌سقف» روندگیر
+        self._fi_market = money.fee_fracs(float(getattr(cfg, "MAKER_FEE_PCT", 0.0)),
+                                          float(getattr(cfg, "TAKER_FEE_PCT", 0.0)),
+                                          float(getattr(cfg, "TAKER_SLIPPAGE_PCT", 0.0)), True)[0]
+        self._tr_tp_r = float(getattr(cfg, "TR_TP_R", 50.0))
         self._finals = {}
 
     def finals(self, name, variant):
@@ -143,6 +151,11 @@ class SymbolPrep:
             # ورود پولبک همیشه لیمیته: کارمزد ورود = میکر (همون money.fee_fracs با ورود لیمیت)
             net = variant["net"]
             variant = dict(variant, net=(net[2], net[1], net[2]))
+        if name == "trend_follow":
+            # روندگیر: ورود بازار (کارمزد تیکر) و حد سود عملاً غیرفعال
+            net = variant.get("net")
+            variant = dict(variant, min_rr=self._tr_tp_r,
+                           net=(self._fi_market, net[1], net[2]) if net else None)
         key = (name, variant["min_rr"], variant["min_sl_pct"], variant["min_sl_atr"], variant["room"],
                variant.get("min_score", 0.0) if uses_score else None, variant.get("net"))
         f = self._finals.get(key)
@@ -280,7 +293,7 @@ def candidates_for(preps, active, mode, variant, lookback):
 def run_single(preps, symbols, cfg, record=True):
     """اجرای یک تنظیم کامل (برای بک‌تست تکی پنل) با ثبت همه‌ی سیگنال‌ها."""
     import strategies
-    active = [strategies.engine_name(cfg)]
+    active = strategies.engine_names(cfg)
     variant = variant_from_cfg(cfg)
     cands = candidates_for(preps, active, cfg.STRATEGY_COMBINE_MODE, variant,
                            int(getattr(cfg, "CONFIRM_LOOKBACK_BARS", 8)))

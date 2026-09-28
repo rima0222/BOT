@@ -24,7 +24,7 @@ import signals_engine as se
 import sim_engine
 
 STRATEGIES = ["box_breakout", "weighted_confluence"]
-STRATEGY_LABELS = {"box_breakout": "شکست باکس", "weighted_confluence": "ترکیبی وزن‌دار"}
+STRATEGY_LABELS = {"box_breakout": "شکست باکس", "weighted_confluence": "ترکیبی وزن‌دار", "trend_follow": "روندگیر"}
 TRAIL_FA = {"strict": "تریلینگ سخت‌گیر", "tight": "تریلینگ حساس", "balanced": "تریلینگ متعادل", "loose": "تریلینگ پلکانی"}
 TF_LABELS = {"1m": "۱ دقیقه (اسکلپ)", "5m": "۵ دقیقه (اسکلپ)", "15m": "۱۵ دقیقه", "1h": "۱ ساعته", "4h": "۴ ساعته"}
 STRICT_FA = {"loose": "سبک‌گیر", "normal": "معمولی", "strict": "سخت‌گیر", "very_strict": "خیلی سخت‌گیر"}
@@ -34,6 +34,14 @@ FLAG_DIMS = ("htf", "min_sl", "room", "btc_filter", "long_only", "retest", "earl
 def _strat(conf):
     act = conf.get("active_strategies") or ["weighted_confluence"]
     return act[0]
+
+
+def _strat_key(conf):
+    return "+".join(conf.get("active_strategies") or ["weighted_confluence"])
+
+
+def _strat_label(conf):
+    return " + ".join(STRATEGY_LABELS.get(a, a) for a in (conf.get("active_strategies") or ["weighted_confluence"]))
 
 
 def _trail_txt(tr):
@@ -49,18 +57,21 @@ def describe(conf):
         htf_txt = f"تایید HTF: {STRICT_FA.get(conf['strictness'], conf['strictness'])}"
     else:
         htf_txt = "بدون تایید HTF"
-    st = _strat(conf)
-    parts = [TF_LABELS.get(conf.get("timeframe"), conf.get("timeframe", "")), STRATEGY_LABELS.get(st, st)]
-    if st == "weighted_confluence":
+    acts = conf.get("active_strategies") or ["weighted_confluence"]
+    parts = [TF_LABELS.get(conf.get("timeframe"), conf.get("timeframe", "")), _strat_label(conf)]
+    if "weighted_confluence" in acts:
         parts.append(f"امتیاز ≥ {conf.get('min_score') or 70:g}")
-    parts += [htf_txt, _trail_txt(conf["trailing"])]
-    if st == "box_breakout":
+    only_trend = acts == ["trend_follow"]
+    parts += [htf_txt] + ([] if only_trend else [_trail_txt(conf["trailing"])])
+    if "box_breakout" in acts:
         parts.append("ورود با پولبک" if conf.get("retest") else "ورود روی شکست")
+    if conf.get("cut"):
+        parts.append(f"بستن در ‎-{conf['cut']:g}R")
     if conf.get("early_exit"):
         parts.append("خروج زودهنگام")
     if conf.get("daily_loss"):
         parts.append("حد ضرر روزانه")
-    if conf["min_sl"]:
+    if conf["min_sl"] and not only_trend:
         parts.append("حداقل فاصله‌ی SL")
     if conf["room"]:
         parts.append("فضای تا هدف")
@@ -105,6 +116,7 @@ def evaluate(preps, order, cfg, conf, split_ms, record=False, merged_cache=None)
     elif P.early is None:
         P.early = (int(cfg.EARLY_EXIT_BARS), float(cfg.EARLY_EXIT_MIN_R))
     P.daily_loss = float(cfg.DAILY_LOSS_LIMIT_USD) if conf.get("daily_loss") else 0.0
+    P.cut = float(conf.get("cut") or 0.0)
     res = sim_engine.run_portfolio(merged, preps, order, P, record=record)
     sb = P.start_balance
     return res, {
@@ -115,22 +127,23 @@ def evaluate(preps, order, cfg, conf, split_ms, record=False, merged_cache=None)
 
 
 def _engine_active(conf):
-    st = _strat(conf)
-    if st == "box_breakout" and conf.get("retest"):
-        return ["box_breakout@retest"]
-    return [st]
+    out = []
+    for st in (conf.get("active_strategies") or ["weighted_confluence"]):
+        out.append("box_breakout@retest" if (st == "box_breakout" and conf.get("retest")) else st)
+    return out
 
 
 def _conf(tf, strategy, min_score, strictness, htf, trailing, min_sl, room, btc, long_only,
-          retest=False, early_exit=False, daily_loss=False):
-    """trailing: False یا اسم پروفایل تریلینگ. min_score فقط برای ترکیبی وزن‌دار (بقیه None).
-    retest فقط برای شکست باکس معنی داره."""
-    return {"timeframe": tf, "active_strategies": [strategy], "combine_mode": "any",
+          retest=False, early_exit=False, daily_loss=False, cut=0.0):
+    """strategy: اسم یا لیست (ترکیب، به ترتیب اولویت). trailing: False یا اسم پروفایل تریلینگ
+    (روندگیر همیشه شاندلیر خودش). min_score فقط برای ترکیبی وزن‌دار. retest فقط برای شکست باکس."""
+    acts = list(strategy) if isinstance(strategy, (list, tuple)) else [strategy]
+    return {"timeframe": tf, "active_strategies": acts, "combine_mode": "any",
             "min_score": float(min_score) if min_score is not None else None, "strictness": strictness,
             "htf": bool(htf), "trailing": trailing,
             "min_sl": min_sl, "room": room, "btc_filter": btc, "long_only": long_only,
-            "retest": bool(retest) and strategy == "box_breakout", "early_exit": bool(early_exit),
-            "daily_loss": bool(daily_loss)}
+            "retest": bool(retest) and "box_breakout" in acts, "early_exit": bool(early_exit),
+            "daily_loss": bool(daily_loss), "cut": float(cut or 0.0)}
 
 
 def _conf_key(c):
@@ -195,7 +208,31 @@ def run_timeframe(preps, symbols, cfg, tf, start_ms, end_ms, grid="quick", progr
                  else [(True, "loose"), (True, "normal")]) + [(False, "normal")]
     trails = [False] + list(getattr(cfg, "TRAIL_PROFILES", {}) or [True])
     confs = []
-    if grid == "focus":
+    if grid == "all":
+        # «همه‌ی استراتژی‌ها با هم» (یک کلیک): هر استراتژی و ترکیب‌ها با گزینه‌های اصلیشون.
+        # فیلترهایی که داده‌ی واقعی مفید نشونشون نداد خاموش؛ حداقل فاصله‌ی SL و حد ضرر روزانه روشن.
+        hl = [(True, "loose"), (False, "normal")]
+        for htf, st in hl:
+            for trailing in (False, "strict", "loose"):
+                for cut in (0.0, 0.6):
+                    confs.append(_conf(tf, "weighted_confluence", 70, st, htf, trailing, True, False, False, False,
+                                       False, True, True, cut))
+                    for retest in (False, True):
+                        confs.append(_conf(tf, "box_breakout", None, st, htf, trailing, True, False, False, False,
+                                           retest, True, True, cut))
+        for htf, st in [(True, "loose"), (True, "normal"), (False, "normal")]:
+            for early in (False, True):
+                for cut in (0.0, 0.6):
+                    confs.append(_conf(tf, "trend_follow", None, st, htf, False, True, False, False, False,
+                                       False, early, True, cut))
+        for combo in (["trend_follow", "box_breakout"], ["trend_follow", "weighted_confluence"],
+                      ["trend_follow", "box_breakout", "weighted_confluence"]):
+            for htf, st in hl:
+                for trailing in ("strict", "loose"):
+                    for cut in (0.0, 0.6):
+                        confs.append(_conf(tf, combo, 70 if "weighted_confluence" in combo else None, st, htf,
+                                           trailing, True, False, False, False, True, False, True, cut))
+    elif grid == "focus":
         # فقط شکست باکس؛ فیلترهای قدیمی خاموش؛ فقط گزینه‌های جدید با هم مقایسه می‌شن
         for htf, st in [(True, "loose"), (True, "normal"), (False, "normal")]:
             for trailing in trails:
@@ -233,7 +270,7 @@ def run_timeframe(preps, symbols, cfg, tf, start_ms, end_ms, grid="quick", progr
             continue
         try:
             conf = {"min_score": cfg.WC_MIN_SCORE_PCT, "retest": False, "early_exit": False, "daily_loss": False,
-                    **conf}
+                    "cut": 0.0, **conf}
             if _strat(conf) != "weighted_confluence":
                 conf["min_score"] = None
             _, m = evaluate(preps, order, cfg, conf, split_ms)
@@ -270,8 +307,8 @@ def build_report(results, tf_meta, baseline_rows, grid):
 
 def write_results_csv(results, path):
     """همه‌ی نتایج (هر تنظیم یک ردیف) برای بررسی دقیق‌تر در اکسل یا ارسال برای تحلیل."""
-    fields = ["timeframe", "strategy", "min_score", "strictness", "trailing", *FLAG_DIMS, "eligible", "oos_ok",
-              "rank_score"]
+    fields = ["timeframe", "strategy", "min_score", "strictness", "trailing", "cut_r", *FLAG_DIMS, "eligible",
+              "oos_ok", "rank_score"]
     segs = ("is", "oos", "full")
     mets = ("trades", "wins", "losses", "win_rate", "trail_trades", "trail_pnl", "trail_pct", "avg_r", "r_lcb",
             "profit_factor", "return_pct", "max_dd_pct", "pos_months_pct", "fees", "long_trades", "short_trades",
@@ -281,7 +318,8 @@ def write_results_csv(results, path):
         w.writerow(fields + [f"{s}_{m}" for s in segs for m in mets])
         for r in sorted(results, key=lambda x: x["score"], reverse=True):
             c = r["config"]
-            row = [c["timeframe"], _strat(c), c.get("min_score"), c["strictness"], c["trailing"] or "off",
+            row = [c["timeframe"], _strat_key(c), c.get("min_score"), c["strictness"], c["trailing"] or "off",
+                   c.get("cut") or 0,
                    *[int(bool(c.get(d))) for d in FLAG_DIMS], int(r["eligible"]), int(r["oos_ok"]),
                    round(r["score"], 4)]
             for s in segs:
@@ -340,7 +378,8 @@ def _paired_effects(results):
             ("long_only", "فقط خرید (حذف فروش)"),
             ("retest", "ورود با پولبک (در برابر ورود روی کندل شکست)"),
             ("early_exit", "خروج زودهنگام (اگه تا چند کندل جلو نرفت)"),
-            ("daily_loss", "حد ضرر روزانه")]
+            ("daily_loss", "حد ضرر روزانه"),
+            ("cut", "بستن در ‎-0.6R (در برابر حد ضرر کامل)")]
 
     def summarize(dim, label, pairs):
         d = [a["full"]["avg_r"] - b["full"]["avg_r"] for a, b in pairs]
@@ -382,6 +421,8 @@ def _paired_effects(results):
     brk, wc = {}, {}
     for r in results:
         c = r["config"]
+        if len(c.get("active_strategies") or []) != 1:
+            continue
         if _strat(c) == "box_breakout":
             brk[keys(c)] = r
         elif c.get("min_score") == 70.0:
@@ -393,7 +434,7 @@ def _paired_effects(results):
 
     by_sc = defaultdict(dict)
     for r in results:
-        if _strat(r["config"]) != "weighted_confluence":
+        if (r["config"].get("active_strategies") or []) != ["weighted_confluence"]:
             continue
         by_sc[keyf(r["config"], "min_score")][r["config"].get("min_score")] = r
     for sc in (50.0, 60.0, 80.0, 90.0):
@@ -426,7 +467,7 @@ def _strategy_summary(results):
     groups = defaultdict(list)
     for r in results:
         c = r["config"]
-        groups[(c["timeframe"], _strat(c), c.get("min_score"))].append(r)
+        groups[(c["timeframe"], _strat_key(c), c.get("min_score"))].append(r)
     rows = []
     for (tf, strat, sc), rs in groups.items():
         elig = [r for r in rs if r["eligible"]]
@@ -434,7 +475,7 @@ def _strategy_summary(results):
         pos_share = sum(1 for r in rs if r["full"]["avg_r"] > 0 and r["full"]["trades"] >= 10) / len(rs) * 100
         rows.append({
             "timeframe": tf, "strategy": strat, "min_score": sc,
-            "label": f"{TF_LABELS.get(tf, tf)} — {STRATEGY_LABELS.get(strat, strat)}"
+            "label": f"{TF_LABELS.get(tf, tf)} — {' + '.join(STRATEGY_LABELS.get(a, a) for a in strat.split('+'))}"
                      + (f" — امتیاز ≥ {sc:g}" if sc is not None else ""),
             "configs": len(rs), "positive_share_pct": round(pos_share, 1),
             "best_label": describe(best["config"]), "best_is": best["is"], "best_oos": best["oos"],

@@ -26,7 +26,7 @@ import indicators as ind
 import market_data
 import money
 
-STRATEGY_NAMES = ["weighted_confluence", "box_breakout", "box_breakout@retest"]
+STRATEGY_NAMES = ["weighted_confluence", "box_breakout", "box_breakout@retest", "trend_follow"]
 LONG, SHORT = 1, -1
 
 
@@ -220,7 +220,42 @@ def compute_structural(series, cfg, first_idx=0):
         out["weighted_confluence"] = _structural_weighted(series, cfg, ctx)
     if any(n.startswith("box_breakout") for n in names):
         out.update(_structural_breakout(series, cfg, ctx))
+    if "trend_follow" in names:
+        out["trend_follow"] = _structural_trend(series, cfg, ctx)
     return out
+
+
+def _structural_trend(series, cfg, ctx):
+    """معادل strategies.generate_trend_follow."""
+    n = series.n
+    o, h, l, c, v = series.o, series.h, series.l, series.c, series.v
+    N = int(cfg.TR_BREAKOUT_BARS)
+    wlen, trend, atr, atr_ok, in_range = ctx["wlen"], ctx["trend"], ctx["atr"], ctx["atr_ok"], ctx["in_range"]
+    ok = in_range & (wlen >= max(30, N + 2)) & atr_ok
+    top = ind.prev_max(h, N)
+    bot = ind.prev_min(l, N)
+    top_p, bot_p, c_p = _prev(top), _prev(bot), _prev(c)
+    ma = ind.sma(c, int(cfg.TR_MA))
+    with np.errstate(invalid="ignore"):
+        vm = float(getattr(cfg, "TR_VOL_MULT", 0.0) or 0.0)
+        if vm > 0:
+            va = ind.prev_mean(v, N)
+            vol_ok = (va > 0) & (v >= vm * va)
+        else:
+            vol_ok = np.ones(n, dtype=bool)
+        Lm = ok & (c > o) & (c > top) & (c_p <= top_p) & (c > ma) & (trend != -1) & vol_ok
+        Sm = ok & (c < o) & (c < bot) & (c_p >= bot_p) & (c < ma) & (trend != 1) & vol_ok
+        dist = cfg.TR_SL_ATR * atr
+        sl_long = c - dist
+        sl_short = c + dist
+    nan_lv = np.full(n, np.nan)
+    nan_sc = np.full(n, np.nan)
+
+    def mk(mask, sl):
+        idx = np.flatnonzero(mask)
+        return Structural(idx, sl[idx], nan_lv[idx], atr[idx], False, nan_sc[idx], use_score=False)
+
+    return (mk(Lm, sl_long), mk(Sm, sl_short))
 
 
 def _structural_weighted(series, cfg, ctx):
@@ -469,10 +504,28 @@ def finalize_strategy(structural_pair, close, variant):
 
 
 def combine(finals, active, mode="any", lookback=8):
-    """در هر اجرا فقط یک استراتژی فعاله؛ خروجی نهایی همون سیگنال‌های نهایی‌شده‌ی اونه."""
-    name = active[0] if active else "weighted_confluence"
-    f = finals.get(name)
-    if f is None:
+    """
+    یک یا چند استراتژی فعال: سیگنال‌های همه با هم، و اگه چندتا روی یک کندل سیگنال دادن، اولی
+    (به ترتیب اولویت در active) برنده‌ست — دقیقاً مثل strategies.generate_combined_signal.
+    """
+    names = [a for a in (active or ["weighted_confluence"]) if a in finals]
+    if not names:
         return None
-    return {"idx": f.idx, "side": f.side, "sl": f.sl, "tp": f.tp, "rr": f.rr, "score": f.score,
-            "entry": f.entry, "label": [name] * len(f.idx)}
+    if len(names) == 1:
+        f = finals[names[0]]
+        return {"idx": f.idx, "side": f.side, "sl": f.sl, "tp": f.tp, "rr": f.rr, "score": f.score,
+                "entry": f.entry, "label": [names[0]] * len(f.idx)}
+    cols = {k: [] for k in ("idx", "side", "sl", "tp", "rr", "score", "entry", "pri")}
+    for pri, name in enumerate(names):
+        f = finals[name]
+        for k in ("idx", "side", "sl", "tp", "rr", "score", "entry"):
+            cols[k].append(getattr(f, k))
+        cols["pri"].append(np.full(len(f.idx), pri, dtype=np.int32))
+    m = {k: np.concatenate(v) for k, v in cols.items()}
+    order = np.lexsort((m["pri"], m["idx"]))
+    m = {k: v[order] for k, v in m.items()}
+    keep = np.ones(len(m["idx"]), dtype=bool)
+    keep[1:] = m["idx"][1:] != m["idx"][:-1]
+    m = {k: v[keep] for k, v in m.items()}
+    return {"idx": m["idx"], "side": m["side"], "sl": m["sl"], "tp": m["tp"], "rr": m["rr"], "score": m["score"],
+            "entry": m["entry"], "label": [names[int(p)] for p in m["pri"].tolist()]}

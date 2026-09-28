@@ -268,7 +268,7 @@
       <div class="controls-row" id="ladderRow" style="font-size:11px; color:var(--muted);"></div>
       <div class="controls-row" style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border);">
         <label>استراتژی:</label>
-        <select id="strategySelect" style="width:170px;"></select>
+        <select id="strategySelect" style="width:230px;"></select>
         <span id="wcBox"><span class="hint" id="weightsInfo"></span>
         <label style="margin-right:14px;">حداقل امتیاز ورود:</label>
         <select id="minScoreSelect" style="width:110px;"></select></span>
@@ -282,6 +282,8 @@
         </div>
         <label style="margin-right:14px;">حد ضرر روزانه ($، ۰ = خاموش):</label>
         <input type="number" id="dailyLossInput" min="0" step="1" style="width:80px;">
+        <label style="margin-right:14px;" title="اگه قیمت به این اندازه از ریسک بر خلاف ما رفت، همون‌جا بسته می‌شه (حجم و حد سود همچنان بر اساس حد ضرر کامل)">بستن در ‎-xR (۰ = خاموش):</label>
+        <input type="number" id="cutLossInput" min="0" max="0.95" step="0.05" style="width:70px;">
         <button id="saveDailyBtn" class="btn btn-save" style="padding:6px 12px;">ذخیره</button>
       </div>
       <div class="controls-row" style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border);">
@@ -426,6 +428,11 @@
         <h2>🏆 مقایسه‌ی خودکار استراتژی‌ها و انتخاب بهترین</h2>
         <span class="hint">صدها ترکیب (استراتژی × سخت‌گیری × تریلینگ × بهبودها) روی همون دیتای تاریخی، با اعتبارسنجی روی دیتای دیده‌نشده</span>
       </div>
+      <div class="controls-row" style="background:rgba(63,185,80,.08); padding:10px; border-radius:8px;">
+        <button id="cmpAllBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">🏆 مقایسه‌ی همه‌ی استراتژی‌ها با یک کلیک</button>
+        <span class="hint">روندگیر، شکست باکس، ترکیبی وزن‌دار و ترکیب‌هاشون — با/بدون تایید HTF، تریلینگ، پولبک، خروج زودهنگام، بستن در ‎-0.6R —
+          روی ۱۵ دقیقه، ۱ ساعته و ۴ ساعته، ۲ سال، ۳۰ نماد. یک گزارش، با بهترین انتخاب و دکمه‌ی اعمال روی ربات.</span>
+      </div>
       <div class="controls-row">
         <label>بازه:</label>
         <select id="cmpDays">
@@ -446,7 +453,8 @@
       <div class="controls-row">
         <label>دامنه:</label>
         <select id="cmpGrid" style="width:260px;">
-          <option value="focus" selected>🎯 فقط استراتژی جدید (شکست باکس + گزینه‌های جدید) — ۲۴۰ تنظیم</option>
+          <option value="all" selected>🏆 همه‌ی استراتژی‌ها و ترکیب‌ها — حدود ۷۰ تنظیم برای هر تایم‌فریم</option>
+          <option value="focus">🎯 فقط شکست باکس + گزینه‌هاش — ۲۴۰ تنظیم</option>
           <option value="quick">سریع، هر دو استراتژی — حدود ۷۰۰ تنظیم برای هر تایم‌فریم</option>
           <option value="full">کامل — چند هزار تنظیم برای هر تایم‌فریم (خیلی طولانی‌تر)</option>
         </select>
@@ -525,7 +533,7 @@
       </div>
       <div class="controls-row">
         <label>استراتژی:</label>
-        <select id="btStrategy" style="width:170px;"></select>
+        <select id="btStrategy" style="width:230px;"></select>
         <label style="margin-right:14px;">ضرر خالص هر معامله ($):</label>
         <input type="number" id="btRiskUsd" min="0.5" max="1000" step="0.5" style="width:80px;">
         <span class="hint">حد سود خالص = ۲ برابر (بعد از کارمزد)</span>
@@ -533,6 +541,8 @@
         <label class="switch-label"><input type="checkbox" id="btEarly"> خروج زودهنگام</label>
         <label>حد ضرر روزانه ($):</label>
         <input type="number" id="btDailyLoss" min="0" step="1" style="width:70px;">
+        <label>بستن در ‎-xR:</label>
+        <input type="number" id="btCutLoss" min="0" max="0.95" step="0.05" style="width:65px;">
       </div>
       <div class="controls-row">
         <button id="btNewOnlyBtn" class="btn btn-start" title="فقط شکست باکس + پولبک + تریلینگ سخت‌گیر + خروج زودهنگام + حد ضرر روزانه + حداقل فاصله‌ی SL + تایید HTF وزن‌دار؛ بقیه‌ی فیلترها خاموش">🎯 تست فقط استراتژی جدید (با یک کلیک)</button>
@@ -716,7 +726,8 @@ function resultBadge(result, et){
   return '<span class="badge manual">سایر</span>';
 }
 
-const STRAT_FA = {weighted_confluence: 'ترکیبی وزن‌دار', box_breakout: 'شکست باکس', 'box_breakout@retest': 'شکست باکس (پولبک)'};
+const STRAT_FA = {weighted_confluence: 'ترکیبی وزن‌دار', box_breakout: 'شکست باکس', 'box_breakout@retest': 'شکست باکس (پولبک)',
+                  trend_follow: 'روندگیر'};
 function stratName(n){ return STRAT_FA[n] || n || '—'; }
 function htfTxt(v){ return (v === null || v === undefined) ? '—' : (v > 5 || window.__htfWeighted ? v + '٪' : v + '/5'); }
 
@@ -726,7 +737,7 @@ function exitTypeBadge(et){
     TRAIL_SL: ['تریلینگ', 'trail'], BREAKEVEN: ['سربه‌سر', 'breakeven'], MANUAL: ['دستی', 'manual'],
     END: ['پایان دیتا (باز مونده)', 'manual'], TIME: ['حد زمانی', 'breakeven'],
     CANCELLED: ['لغو (پر نشد)', 'manual'], MANUAL_CANCEL: ['لغو دستی', 'manual'],
-    EARLY: ['خروج زودهنگام', 'breakeven'],
+    EARLY: ['خروج زودهنگام', 'breakeven'], CUT: ['بستن در ‎-xR', 'breakeven'],
   };
   const [label, cls] = map[et] || [et || '—', 'manual'];
   return `<span class="badge ${cls}">${label}</span>`;
@@ -793,7 +804,9 @@ document.getElementById('entryModeSelect').addEventListener('change', (e) => pos
 
 document.getElementById('minScoreSelect').addEventListener('change', (e) => postControl({min_score: parseFloat(e.target.value)}));
 document.getElementById('strategySelect').addEventListener('change', (e) => postControl({strategy: e.target.value}));
-document.getElementById('saveDailyBtn').addEventListener('click', () => postControl({daily_loss: parseFloat(document.getElementById('dailyLossInput').value) || 0}));
+document.getElementById('saveDailyBtn').addEventListener('click', () => postControl({
+  daily_loss: parseFloat(document.getElementById('dailyLossInput').value) || 0,
+  cut_loss_r: parseFloat(document.getElementById('cutLossInput').value) || 0}));
 document.getElementById('trailProfileSelect').addEventListener('change', (e) => postControl({trail_profile: e.target.value}));
 
 document.getElementById('resetCapitalBtn').addEventListener('click', async () => {
@@ -934,10 +947,14 @@ async function refresh(){
     const stSel = document.getElementById('strategySelect');
     if(!stSel.options.length) stSel.innerHTML = Object.entries(data.strategy_labels).map(([k,l]) => `<option value="${k}">${l}</option>`).join('');
     if(document.activeElement.id !== 'strategySelect') stSel.value = data.strategy;
-    const isWc = data.strategy === 'weighted_confluence';
+    const acts = String(data.strategy).split('+');
+    const isWc = acts.includes('weighted_confluence');
     document.getElementById('wcBox').style.display = isWc ? '' : 'none';
-    document.getElementById('brkInfo').style.display = isWc ? 'none' : '';
-    document.getElementById('brkInfo').innerText = `(شکست باکس ${data.breakout.box_bars} کندلی یا حمایت/مقاومت، فقط با کندل بسته؛ حجم کندل شکست حداقل ${data.breakout.vol_mult}× میانگین؛ روند داو خلاف جهت نباشه)`;
+    const infos = [];
+    if(acts.includes('box_breakout')) infos.push(`شکست باکس ${data.breakout.box_bars} کندلی یا حمایت/مقاومت با کندل بسته، حجم ≥ ${data.breakout.vol_mult}× میانگین`);
+    if(acts.includes('trend_follow')) infos.push(`روندگیر: شکست سقف/کف ${data.trend_info.bars} کندل هم‌جهت SMA${data.trend_info.ma}، حد ضرر ${data.trend_info.sl_atr}×ATR، بدون حد سود ثابت، ${data.trend_info.trail}`);
+    document.getElementById('brkInfo').style.display = infos.length ? '' : 'none';
+    document.getElementById('brkInfo').innerText = infos.length ? '(' + infos.join(' | ') + ')' : '';
     riskMode = data.risk_mode;
     document.getElementById('riskPctBox').style.display = riskMode === 'usd' ? 'none' : '';
     document.getElementById('riskUsdBox').style.display = riskMode === 'usd' ? '' : 'none';
@@ -967,6 +984,7 @@ async function refresh(){
     document.getElementById('retestTip').innerText = `(مهلت ${data.retest_wait_bars} کندل)`;
     document.getElementById('earlyTip').innerText = `(اگه تا ${data.early_exit_bars} کندل ${data.early_exit_min_r}R جلو نرفت)`;
     if(document.activeElement.id !== 'dailyLossInput') document.getElementById('dailyLossInput').value = data.daily_loss;
+    if(document.activeElement.id !== 'cutLossInput') document.getElementById('cutLossInput').value = data.cut_loss_r;
 
 
     // پنل کنترل
@@ -1155,15 +1173,16 @@ async function initBacktestControls(){
       document.getElementById('btRetest').checked = !!data.retest;
       document.getElementById('btEarly').checked = !!data.early_exit;
       document.getElementById('btDailyLoss').value = data.daily_loss;
+      document.getElementById('btCutLoss').value = data.cut_loss_r;
       btStrategyChanged();
     }
   }catch(e){ console.error(e); }
 }
 
 function btStrategyChanged(){
-  const wc = document.getElementById('btStrategy').value === 'weighted_confluence';
-  document.getElementById('btMinScoreBox').style.display = wc ? '' : 'none';
-  document.getElementById('btRetest').parentElement.style.display = wc ? 'none' : '';
+  const acts = document.getElementById('btStrategy').value.split('+');
+  document.getElementById('btMinScoreBox').style.display = acts.includes('weighted_confluence') ? '' : 'none';
+  document.getElementById('btRetest').parentElement.style.display = acts.includes('box_breakout') ? '' : 'none';
 }
 document.getElementById('btNewOnlyBtn').addEventListener('click', () => {
   // فقط استراتژی جدید با همه‌ی گزینه‌های جدیدش؛ فیلترهای قدیمی خاموش
@@ -1207,6 +1226,7 @@ document.getElementById('btStartBtn').addEventListener('click', async () => {
       retest: document.getElementById('btRetest').checked,
       early_exit: document.getElementById('btEarly').checked,
       daily_loss: parseFloat(document.getElementById('btDailyLoss').value) || 0,
+      cut_loss_r: parseFloat(document.getElementById('btCutLoss').value) || 0,
       overrides: { USE_TRAILING_SL: trailing },
     })
   });
@@ -1348,11 +1368,11 @@ function renderBacktestResult(r){
   const seg = r.segments;
   document.getElementById('btSegmentsBox').style.display = seg ? 'block' : 'none';
   if(seg){
-    const row = (name, m) => `<tr><td>${name}</td><td>${m.trades}</td><td>${m.win_rate}%</td>
+    const row = (name, m) => `<tr><td>${name}</td><td>${m.trades}</td><td>${m.pos_rate ?? m.win_rate}%</td>
       <td class="${m.avg_r>=0?'num-pos':'num-neg'}" dir="ltr">${m.avg_r>=0?'+':''}${m.avg_r.toFixed(3)}R</td>
       <td>${m.profit_factor}</td><td class="${m.return_pct>=0?'num-pos':'num-neg'}" dir="ltr">${m.return_pct>=0?'+':''}${m.return_pct}%</td>
       <td>${m.max_dd_pct}%</td><td>${m.pos_months_pct}%</td></tr>`;
-    document.getElementById('btSegments').innerHTML = `<thead><tr><th>بخش</th><th>معاملات</th><th>وین‌ریت</th>
+    document.getElementById('btSegments').innerHTML = `<thead><tr><th>بخش</th><th>معاملات</th><th>٪ معاملات سودده</th>
       <th>میانگین R (بعد از کارمزد)</th><th>ضریب سود</th><th>بازده</th><th>بیشینه افت</th><th>ماه‌های سودده</th></tr></thead><tbody>` +
       row('۷۰٪ اول', seg.first_70) + row('۳۰٪ آخر', seg.last_30) + row('کل', seg.full) + '</tbody>';
   }
@@ -1411,8 +1431,16 @@ const STRICT_LABEL = {loose:'سبک‌گیر', normal:'معمولی', strict:'س
 function rCell(v){ if(v===null||v===undefined) return '—'; return `<span class="${v>=0?'num-pos':'num-neg'}" dir="ltr">${v>=0?'+':''}${Number(v).toFixed(3)}R</span>`; }
 function pctCell(v){ if(v===null||v===undefined) return '—'; return `<span class="${v>=0?'num-pos':'num-neg'}" dir="ltr">${v>=0?'+':''}${fmt(v,1)}%</span>`; }
 function segCells(m){
-  return `<td>${m.trades}</td><td>${m.win_rate}%</td><td>${rCell(m.avg_r)}</td><td>${m.profit_factor}</td><td>${pctCell(m.return_pct)}</td><td>${m.max_dd_pct}%</td>`;
+  return `<td>${m.trades}</td><td>${m.pos_rate ?? m.win_rate}%</td><td>${rCell(m.avg_r)}</td><td>${m.profit_factor}</td><td>${pctCell(m.return_pct)}</td><td>${m.max_dd_pct}%</td>`;
 }
+
+document.getElementById('cmpAllBtn').addEventListener('click', () => {
+  document.getElementById('cmpDays').value = '730';
+  document.getElementById('cmpTopN').value = '30';
+  document.getElementById('cmpGrid').value = 'all';
+  document.querySelectorAll('#cmpTfChecks input').forEach(x => x.checked = ['15m', '1h', '4h'].includes(x.dataset.tf));
+  document.getElementById('cmpStartBtn').click();
+});
 
 document.getElementById('cmpStartBtn').addEventListener('click', async () => {
   const msg = document.getElementById('cmpMsg');
@@ -1528,7 +1556,8 @@ function backtestCompareConfig(source, idx){
   document.getElementById('btStrictness').value = conf.strictness;
   document.getElementById('btTrailing').checked = !!conf.trailing;
   if(typeof conf.trailing === 'string') document.getElementById('btTrailProfile').value = conf.trailing;
-  if(conf.active_strategies && conf.active_strategies[0]) document.getElementById('btStrategy').value = conf.active_strategies[0];
+  if(conf.active_strategies && conf.active_strategies.length) document.getElementById('btStrategy').value = conf.active_strategies.join('+');
+  if('cut' in conf) document.getElementById('btCutLoss').value = conf.cut || 0;
   if('retest' in conf) document.getElementById('btRetest').checked = !!conf.retest;
   if('early_exit' in conf) document.getElementById('btEarly').checked = !!conf.early_exit;
   if('daily_loss' in conf) document.getElementById('btDailyLoss').value = conf.daily_loss ? 15 : 0;

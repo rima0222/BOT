@@ -293,7 +293,7 @@ def open_trade(conn, symbol, side, entry, sl, tp, risk_pct, start_balance,
 
 # ==================== تریلینگ استاپ ====================
 
-def compute_trailing_sl(entry, initial_sl, side, peak_price, ladder, beyond_distance_r, floor=None):
+def compute_trailing_sl(entry, initial_sl, side, peak_price, ladder, beyond_distance_r, floor=None, floor_r=None):
     """
     بر اساس بیشترین سود دیده‌شده تا الان (peak_price)، حد ضرر پویا رو حساب می‌کنه.
     ladder: لیستی از (trigger_R, lock_R) که باید بر اساس trigger_R مرتب باشه.
@@ -323,7 +323,7 @@ def compute_trailing_sl(entry, initial_sl, side, peak_price, ladder, beyond_dist
     new_sl = entry + locked_r * risk_per_unit if side == "LONG" else entry - locked_r * risk_per_unit
     # کف سربه‌سر بعد از کارمزد (floor): وقتی تریلینگ فعال شد، دیگه با ضرر بسته نمی‌شه.
     # (هیچ‌وقت بالاتر از بیشترین قیمت دیده‌شده نمی‌ره — قیمتی که بازار بهش نرسیده قفل نمی‌شه)
-    if floor is not None:
+    if floor is not None and (floor_r is None or peak_r >= floor_r - 1e-9):
         new_sl = max(new_sl, min(floor, peak_price)) if side == "LONG" else min(new_sl, max(floor, peak_price))
     # حد ضرر هیچ‌وقت نباید عقب‌تر از حد ضرر اولیه بره (فقط جلو می‌ره، هیچ‌وقت بدتر نمی‌شه)
     if side == "LONG":
@@ -347,7 +347,8 @@ def update_trailing_stops(conn, symbol, current_price, ladder, beyond_distance_r
 
 # ==================== مدیریت کندل‌به‌کندل (مشترک بین زنده و بک‌تست) ====================
 
-def step_bar(side, entry, initial_sl, sl, tp, peak, trailing, o, h, l, c, ladder, beyond_distance_r, floor=None):
+def step_bar(side, entry, initial_sl, sl, tp, peak, trailing, o, h, l, c, ladder, beyond_distance_r, floor=None,
+             floor_r=None):
     """
     یک کندل (مثلاً ۱ دقیقه‌ای در زنده، ۱۵ دقیقه‌ای در بک‌تست) رو روی یک پوزیشن باز
     اعمال می‌کنه — با سایه‌ها (high/low)، نه فقط قیمت بسته‌شدن؛ چون حد ضرر واقعی صرافی
@@ -368,7 +369,8 @@ def step_bar(side, entry, initial_sl, sl, tp, peak, trailing, o, h, l, c, ladder
         if not trailing:
             return False, None, None, None, sl, peak
         new_peak = max(peak, h)
-        new_sl = max(compute_trailing_sl(entry, initial_sl, side, new_peak, ladder, beyond_distance_r, floor), sl)
+        new_sl = max(compute_trailing_sl(entry, initial_sl, side, new_peak, ladder, beyond_distance_r, floor, floor_r),
+                     sl)
         # بدبینانه: اگه حد ضرر جدید بالا رفت و کف همین کندل به اون رسیده، فرض می‌شه بعد از سقف رسیده
         if new_sl > sl and l <= new_sl:
             return True, new_sl, "STOP", new_sl, new_sl, new_peak
@@ -381,7 +383,8 @@ def step_bar(side, entry, initial_sl, sl, tp, peak, trailing, o, h, l, c, ladder
         if not trailing:
             return False, None, None, None, sl, peak
         new_peak = min(peak, l)
-        new_sl = min(compute_trailing_sl(entry, initial_sl, side, new_peak, ladder, beyond_distance_r, floor), sl)
+        new_sl = min(compute_trailing_sl(entry, initial_sl, side, new_peak, ladder, beyond_distance_r, floor, floor_r),
+                     sl)
         if new_sl < sl and h >= new_sl:
             return True, new_sl, "STOP", new_sl, new_sl, new_peak
         return False, None, None, None, new_sl, new_peak
@@ -400,7 +403,7 @@ def result_of(exit_type):
         return "LOSS"
     if exit_type in ("TRAIL_SL", "BREAKEVEN"):
         return "TRAIL"
-    if exit_type == "EARLY":
+    if exit_type in ("EARLY", "CUT"):
         return "EARLY"
     return "OTHER"
 
@@ -422,7 +425,7 @@ def classify_exit_level(kind, level, initial_sl, entry, trailing_enabled):
 
 def process_bars(conn, symbol, bars, start_balance, ladder, beyond_distance_r,
                  maker_fee_pct=0.0, taker_fee_pct=0.0, taker_slippage_pct=0.0, funding_pct_8h=0.0,
-                 now_ms=None, trail_floor=False, early_bars=0, early_min_r=0.0):
+                 now_ms=None, trail_floor=False, early_bars=0, early_min_r=0.0, profiles=None, cut_r=0.0):
     """
     ربات زنده: کندل‌های ۱ دقیقه‌ایِ بسته‌شده‌ی جدید رو روی سفارش‌ها/پوزیشن‌های این نماد
     اعمال می‌کنه — دقیقاً با همون قواعد موتور بک‌تست:
@@ -435,16 +438,27 @@ def process_bars(conn, symbol, bars, start_balance, ladder, beyond_distance_r,
     now_ms = now_ms if now_ms is not None else utc_ms(datetime.utcnow())
     rows = conn.execute(
         "SELECT id, side, entry, sl, tp, initial_sl, peak_price, size, trailing_enabled, open_time, last_bar_ts, "
-        "status, expire_ts, max_hold_min, fill_ts, entry_taker, notional, timeframe "
+        "status, expire_ts, max_hold_min, fill_ts, entry_taker, notional, timeframe, strategy_name "
         "FROM trades WHERE symbol=? AND status IN ('OPEN','PENDING')", (symbol,)
     ).fetchall()
     if not rows:
         return
     import market_data
     for (trade_id, side, entry, sl, tp, initial_sl, peak, size, trailing, open_time, last_bar_ts,
-         status, expire_ts, max_hold_min, fill_ts, entry_taker, notional, timeframe) in rows:
+         status, expire_ts, max_hold_min, fill_ts, entry_taker, notional, timeframe, strategy_name) in rows:
         tf_ms = market_data.TF_MS.get(timeframe or "", 0)
         risk_unit = abs(entry - (initial_sl if initial_sl is not None else sl))
+        # پروفایل تریلینگ مخصوص استراتژی (مثلاً شاندلیر روندگیر)؛ وگرنه پروفایل عمومی
+        t_ladder, t_beyond, t_floor_r = ladder, beyond_distance_r, None
+        for prefix, prof in (profiles or {}).items():
+            if (strategy_name or "").startswith(prefix):
+                t_ladder, t_beyond, t_floor_r = prof
+                break
+        # بستن در ‎-cut_r×R (حد ضرر نرم؛ R همچنان بر اساس حد ضرر اولیه)
+        cut_px = None
+        if cut_r and cut_r > 0 and risk_unit > 0:
+            cut_px = entry - cut_r * risk_unit if side == "LONG" else entry + cut_r * risk_unit
+            sl = max(sl, cut_px) if side == "LONG" else min(sl, cut_px)
         trailing = bool(trailing)
         peak = peak if peak is not None else entry
         initial_sl = initial_sl if initial_sl is not None else sl
@@ -478,7 +492,7 @@ def process_bars(conn, symbol, bars, start_balance, ladder, beyond_distance_r,
                     hit, price, kind, level = False, None, None, None
             else:
                 hit, price, kind, level, sl, peak = step_bar(side, entry, initial_sl, sl, tp, peak, trailing,
-                                                             o, h, l, c, ladder, beyond_distance_r, floor)
+                                                             o, h, l, c, t_ladder, t_beyond, floor, t_floor_r)
                 if not hit and not trailing:
                     # بیشترین سود دیده‌شده (برای خروج زودهنگام؛ با تریلینگ خود step_bar آپدیتش می‌کنه)
                     peak = max(peak, h) if side == "LONG" else min(peak, l)
@@ -492,7 +506,8 @@ def process_bars(conn, symbol, bars, start_balance, ladder, beyond_distance_r,
             if not hit and max_hold_min and fill_ts and bar_close_ms >= fill_ts + max_hold_min * 60_000:
                 hit, price, kind, level = True, c, "TIME", None
             if hit:
-                exit_type = classify_exit_level(kind, level, initial_sl, entry, trailing)
+                exit_type = ("CUT" if (cut_px is not None and kind == "STOP" and level == cut_px)
+                             else classify_exit_level(kind, level, initial_sl, entry, trailing))
                 _close_trade_row(conn, trade_id, side, entry, size, price, exit_type, start_balance,
                                  maker_fee_pct, taker_fee_pct, taker_slippage_pct,
                                  as_of=datetime.utcfromtimestamp(bar_close_ms / 1000),

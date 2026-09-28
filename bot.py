@@ -106,10 +106,10 @@ def get_bot_settings():
                                                  "1" if config.USE_TRAILING_SL else "0") == "1"
 
     # در هر لحظه یک استراتژی فعاله (از پنل انتخاب می‌شه)
-    strategy = paper_trader.get_setting(conn, "strategy", config.ACTIVE_STRATEGIES[0])
-    if strategy not in strategies.STRATEGY_REGISTRY:
-        strategy = config.ACTIVE_STRATEGIES[0]
-    active_strategies = [strategy]
+    # یک استراتژی یا ترکیب چندتا («a+b»، به ترتیب اولویت)
+    strategy = paper_trader.get_setting(conn, "strategy", "+".join(config.ACTIVE_STRATEGIES))
+    active_strategies = strategies.parse_strategy(strategy)
+    strategy = "+".join(active_strategies)
     combine_mode = "any"
     trail_profile = paper_trader.get_setting(conn, "trail_profile", config.DEFAULT_TRAIL_PROFILE)
     if trail_profile not in config.TRAIL_PROFILES:
@@ -122,6 +122,10 @@ def get_bot_settings():
         daily_loss = float(paper_trader.get_setting(conn, "daily_loss", config.DAILY_LOSS_LIMIT_USD))
     except (TypeError, ValueError):
         daily_loss = float(config.DAILY_LOSS_LIMIT_USD)
+    try:
+        cut_loss_r = float(paper_trader.get_setting(conn, "cut_loss_r", config.CUT_LOSS_R))
+    except (TypeError, ValueError):
+        cut_loss_r = float(config.CUT_LOSS_R)
     try:
         min_score = float(paper_trader.get_setting(conn, "min_score", config.WC_MIN_SCORE_PCT))
     except (TypeError, ValueError):
@@ -167,6 +171,7 @@ def get_bot_settings():
         "retest": paper_trader.get_setting(conn, "brk_retest", "1" if config.BRK_ENTRY == "retest" else "0") == "1",
         "early_exit": paper_trader.get_setting(conn, "early_exit", "1" if config.EARLY_EXIT else "0") == "1",
         "daily_loss": daily_loss,
+        "cut_loss_r": cut_loss_r,
     }
 
 
@@ -176,7 +181,7 @@ def live_config_snapshot(settings=None):
     return {"timeframe": st["timeframe"], "active_strategies": st["active_strategies"],
             "combine_mode": st["combine_mode"], "min_score": st["min_score"],
             "trail_profile": st["trail_profile"], "retest": st["retest"], "early_exit": st["early_exit"],
-            "daily_loss": st["daily_loss"] > 0,
+            "daily_loss": st["daily_loss"] > 0, "cut_loss_r": st["cut_loss_r"],
             "strictness": st["strictness"], "trailing": st["trail_profile"] if st["trailing_enabled"] else False,
             "min_sl": st["min_sl"],
             "room": st["room"], "btc_filter": st["btc_filter"], "long_only": st["long_only"], "htf": st["htf"]}
@@ -231,6 +236,7 @@ def get_effective_cfg(settings):
         "BRK_ENTRY": "retest" if settings["retest"] else "close",
         "EARLY_EXIT": settings["early_exit"],
         "DAILY_LOSS_LIMIT_USD": settings["daily_loss"],
+        "CUT_LOSS_R": settings["cut_loss_r"],
     }
     # پروفایل تایم‌فریم انتخاب‌شده (تایم‌فریم‌های تایید، کول‌داون، حد زمانی، ...)
     cfg = fast_backtest.profile_cfg(config, settings["timeframe"])
@@ -391,7 +397,7 @@ def scan_symbol(symbol, settings):
     # ۴) ثبت سفارش (لیمیت در انتظار) یا ورود بازار — با رعایت سرمایه، لوریج ایمن و سقف تنوع
     tf_ms = market_data.TF_MS[cfg.TIMEFRAME]
     # ورود با پولبک همیشه لیمیته (روی سطح شکسته‌شده، با مهلت خودش)
-    entry_taker = settings["entry_mode"] == "market" and not sig.get("limit_only")
+    entry_taker = (settings["entry_mode"] == "market" or bool(sig.get("market_only"))) and not sig.get("limit_only")
     wait_bars = int(sig.get("wait_bars") or cfg.LIMIT_WAIT_BARS)
     entry_price = sig["entry"]
     if entry_taker:
@@ -413,7 +419,9 @@ def scan_symbol(symbol, settings):
         min_notional=config.MIN_NOTIONAL_USD, max_open_positions=config.MAX_OPEN_POSITIONS,
         max_leverage=config.MAX_LEVERAGE, leverage_safety_mult=config.LEVERAGE_SAFETY_MULTIPLIER,
         position_pct_cap=config.MAX_POSITION_PCT_OF_CAPITAL,
-        trailing_enabled=settings["trailing_enabled"], strategy_name=strategy_name,
+        # روندگیر همیشه با تریلینگ شاندلیر خودش مدیریت می‌شه (حد سود ثابت نداره)
+        trailing_enabled=settings["trailing_enabled"] or strategy_name.startswith("trend_follow"),
+        strategy_name=strategy_name,
         pending=not entry_taker, expire_ts=candle_close_ms + wait_bars * tf_ms,
         entry_taker=entry_taker, max_hold_min=cfg.MAX_HOLD_MINUTES, timeframe=cfg.TIMEFRAME, score=score,
         risk_usd=settings["risk_usd"] if config.RISK_MODE == "usd" else None,
@@ -507,6 +515,9 @@ def price_check_job():
                 config.FUNDING_PCT_PER_8H, now_ms=now_ms, trail_floor=config.TRAIL_BREAKEVEN_FLOOR,
                 early_bars=config.EARLY_EXIT_BARS if settings["early_exit"] else 0,
                 early_min_r=config.EARLY_EXIT_MIN_R,
+                profiles={"trend_follow": (config.TREND_TRAIL["ladder"], config.TREND_TRAIL["beyond"],
+                                           config.TREND_TRAIL.get("floor_r"))},
+                cut_r=settings["cut_loss_r"],
             )
         except Exception as e:
             log.warning(f"چک قیمت {symbol} با خطا مواجه شد: {e}")
@@ -605,7 +616,11 @@ def api_data():
         "trail_profile": settings["trail_profile"],
         "trail_profiles": {k: v["label"] for k, v in config.TRAIL_PROFILES.items()},
         "strategy": settings["strategy"],
-        "strategy_labels": {k: v["short"] for k, v in strategies.STRATEGY_REGISTRY.items()},
+        "strategy_labels": {**{k: v["short"] for k, v in strategies.STRATEGY_REGISTRY.items()},
+                            **strategies.STRATEGY_COMBOS},
+        "cut_loss_r": settings["cut_loss_r"],
+        "trend_info": {"bars": config.TR_BREAKOUT_BARS, "ma": config.TR_MA, "sl_atr": config.TR_SL_ATR,
+                       "trail": config.TREND_TRAIL["label"]},
         "risk_usd": settings["risk_usd"],
         "risk_mode": config.RISK_MODE,
         "retest": settings["retest"],
@@ -708,11 +723,21 @@ def api_control():
                  f"(فقط روی پوزیشن‌های جدید اثر داره)")
 
     if "strategy" in body:
-        if body["strategy"] in strategies.STRATEGY_REGISTRY:
-            paper_trader.set_setting(conn, "strategy", body["strategy"])
+        parts = str(body["strategy"]).split("+")
+        if parts and all(p_ in strategies.STRATEGY_REGISTRY for p_ in parts):
+            paper_trader.set_setting(conn, "strategy", "+".join(parts))
             log.info(f"[کنترل پنل] استراتژی: {body['strategy']}")
         else:
             return jsonify({"ok": False, "error": "استراتژی نامعتبر است"}), 400
+    if "cut_loss_r" in body:
+        try:
+            cr = float(body["cut_loss_r"])
+            if not 0 <= cr < 1:
+                raise ValueError
+            paper_trader.set_setting(conn, "cut_loss_r", cr)
+            log.info(f"[کنترل پنل] بستن در ‎-{cr:g}R" if cr else "[کنترل پنل] بستن در ‎-xR: خاموش")
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "مقدار «بستن در ‎-xR» باید بین ۰ و ۰.۹۹ باشه"}), 400
     if "trail_profile" in body:
         if body["trail_profile"] in config.TRAIL_PROFILES:
             paper_trader.set_setting(conn, "trail_profile", body["trail_profile"])
@@ -929,7 +954,8 @@ def api_backtest_start():
         "WC_MIN_SCORE_PCT", "RISK_USD", "RISK_MODE", "TRAIL_PROFILE", "BTC_PAIR_WEIGHT", "HTF_WEIGHTED",
         "BRK_BOX_BARS", "BRK_BOX_MAX_ATR", "BRK_BOX_MIN_TOUCHES", "BRK_VOL_MULT", "BRK_MAX_EXT_ATR",
         "BRK_MAIN_TREND", "BRK_SL_MODE", "BRK_USE_SR", "BRK_ENTRY", "BRK_RETEST_WAIT_BARS",
-        "EARLY_EXIT", "EARLY_EXIT_BARS", "EARLY_EXIT_MIN_R", "DAILY_LOSS_LIMIT_USD",
+        "EARLY_EXIT", "EARLY_EXIT_BARS", "EARLY_EXIT_MIN_R", "DAILY_LOSS_LIMIT_USD", "CUT_LOSS_R",
+        "TR_BREAKOUT_BARS", "TR_MA", "TR_SL_ATR", "TR_VOL_MULT",
     }
     overrides = {k: v for k, v in overrides.items() if k in allowed_override_keys}
 
@@ -956,10 +982,13 @@ def api_backtest_start():
         overrides["USE_HTF_CONFIRMATION"] = bool(body["htf"])
     if body.get("min_score") is not None:
         overrides["WC_MIN_SCORE_PCT"] = float(body["min_score"])
-    strat = body.get("strategy")
-    if strat not in strategies.STRATEGY_REGISTRY:
-        strat = get_bot_settings()["strategy"]
-    overrides["ACTIVE_STRATEGIES"] = [strat]
+    strat = body.get("strategy") or get_bot_settings()["strategy"]
+    overrides["ACTIVE_STRATEGIES"] = strategies.parse_strategy(strat)
+    if body.get("cut_loss_r") is not None:
+        try:
+            overrides["CUT_LOSS_R"] = max(0.0, min(0.99, float(body["cut_loss_r"])))
+        except (TypeError, ValueError):
+            pass
     overrides["STRATEGY_COMBINE_MODE"] = "any"
     if body.get("trail_profile") in config.TRAIL_PROFILES:
         overrides["TRAIL_PROFILE"] = body["trail_profile"]
@@ -1096,7 +1125,7 @@ def api_compare_start():
     body = request.get_json(force=True, silent=True) or {}
     days = max(60, min(int(body.get("days", 365)), 1095))
     top_n = max(3, min(int(body.get("top_n", 20)), 60))
-    grid = body.get("grid") if body.get("grid") in ("full", "focus") else "quick"
+    grid = body.get("grid") if body.get("grid") in ("full", "focus", "all") else "quick"
     tfs = [t for t in (body.get("timeframes") or ["15m", "1h", "4h"]) if t in config.TIMEFRAME_PROFILES]
     if not tfs:
         return jsonify({"ok": False, "error": "حداقل یک تایم‌فریم انتخاب کن"}), 400
@@ -1307,9 +1336,11 @@ def api_compare_apply():
     paper_trader.set_setting(conn, "trailing_enabled", "1" if c.get("trailing") else "0")
     if isinstance(c.get("trailing"), str) and c["trailing"] in config.TRAIL_PROFILES:
         paper_trader.set_setting(conn, "trail_profile", c["trailing"])
-    act = c.get("active_strategies") or []
-    if act and act[0] in strategies.STRATEGY_REGISTRY:
-        paper_trader.set_setting(conn, "strategy", act[0])
+    act = [a for a in (c.get("active_strategies") or []) if a in strategies.STRATEGY_REGISTRY]
+    if act:
+        paper_trader.set_setting(conn, "strategy", "+".join(act))
+    if c.get("cut_loss_r") is not None:
+        paper_trader.set_setting(conn, "cut_loss_r", float(c["cut_loss_r"]))
     if "retest" in c:
         paper_trader.set_setting(conn, "brk_retest", "1" if c["retest"] else "0")
     if "early_exit" in c:
