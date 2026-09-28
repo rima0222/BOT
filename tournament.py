@@ -199,8 +199,8 @@ def run_timeframe(preps, symbols, cfg, tf, start_ms, end_ms, grid="quick", progr
         # فقط شکست باکس؛ فیلترهای قدیمی خاموش؛ فقط گزینه‌های جدید با هم مقایسه می‌شن
         for htf, st in [(True, "loose"), (True, "normal"), (False, "normal")]:
             for trailing in trails:
-                for retest, early, daily in itertools.product((False, True), repeat=3):
-                    confs.append(_conf(tf, "box_breakout", None, st, htf, trailing, False, False, False, False,
+                for retest, early, daily, min_sl in itertools.product((False, True), repeat=4):
+                    confs.append(_conf(tf, "box_breakout", None, st, htf, trailing, min_sl, False, False, False,
                                        retest, early, daily))
     else:
         d_retest = getattr(cfg, "BRK_ENTRY", "close") == "retest"
