@@ -240,6 +240,20 @@ def htf_required(preset_of_5, n_tf, short_extra=0):
     return req, min(n_tf, req + int(short_extra))
 
 
+def trade_mae_r(ser, t0, exit_i, side, entry, sl, exit_type):
+    """بیشترین حرکت خلاف جهت (بر حسب R اولیه) از کندل پر شدن تا خروج. کندل خروجِ تریلینگ حساب
+    نمی‌شه (حد ضرر تریلینگ بالای ‎-xR بوده و زودتر خورده). یعنی: یک حد ضرر در ‎-xR دقیقاً وقتی
+    زودتر خورده بود که mae_r ≥ x."""
+    k0 = t0 + 1
+    k_end = exit_i if exit_type in ("TRAIL_SL", "BREAKEVEN") else exit_i + 1
+    risk = abs(entry - sl)
+    if k_end <= k0 or risk <= 0:
+        return 0.0
+    if side == se.LONG:
+        return max(0.0, (entry - float(ser.l[k0:k_end].min())) / risk)
+    return max(0.0, (float(ser.h[k0:k_end].max()) - entry) / risk)
+
+
 def htf_weights(tf_list):
     """وزن هر تایم‌فریم تایید: به ترتیب لیست (از پایین به بالا) ۱، ۲، ۳، ... — بالاتر = وزن بیشتر."""
     return {tf: float(i + 1) for i, tf in enumerate(tf_list)}
@@ -483,6 +497,8 @@ def run_portfolio(merged, preps, symbol_order, P, record=False):
         fee += funding
         pnl = gross - fee
         risk_usd = pos["per_unit_loss"] * size   # ضرر خالص (با کارمزد) اگه حد ضرر اولیه می‌خورد = ۱R
+        # بیشترین حرکت خلاف جهت قبل از خروج (MAE) بر حسب R — برای تحلیل «اگه در ‎-xR می‌بستیم»
+        mae_r = trade_mae_r(ser, t0, exit_i, side, entry, sl, exit_type)
         seq += 1
         heapq.heappush(heap, (exit_t, seq, sr, pos["margin"], pnl, True))
         open_by_sym[sr] = True
@@ -495,6 +511,7 @@ def run_portfolio(merged, preps, symbol_order, P, record=False):
             "funding": funding, "exit_type": exit_type, "rr": float(rrs[j]), "score": round(float(scores[j]), 1),
             "htf_agree": htf_agree if P.use_htf else None,
             "R": pnl / risk_usd if risk_usd > 0 else 0.0, "peak": float(peak), "bars": int(exit_i - t),
+            "mae_r": mae_r, "entry_fee_frac": fi,
         })
         if record:
             sig["opened"] = 1
@@ -579,7 +596,8 @@ def _iso(ms):
 
 def to_sqlite(result, start_balance, trailing):
     conn = paper_trader.get_conn(":memory:")
-    for col, coltype in (("rr_planned", "REAL"), ("htf_agree", "INTEGER"), ("r_multiple", "REAL"), ("score", "REAL")):
+    for col, coltype in (("rr_planned", "REAL"), ("htf_agree", "INTEGER"), ("r_multiple", "REAL"), ("score", "REAL"),
+                         ("mae_r", "REAL"), ("entry_fee_frac", "REAL")):
         try:
             conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {coltype}")
         except Exception:
@@ -593,13 +611,13 @@ def to_sqlite(result, start_balance, trailing):
                      t["notional"], t["margin"], t["leverage"], t["liquidation_price"], 1 if trailing else 0,
                      t["strategy"], "CLOSED", _iso(t["open_time"]), _iso(t["close_time"]), t["close_price"],
                      t["pnl"], t["fee"], t["exit_type"], paper_trader.result_of(t["exit_type"]),
-                     t["rr"], t["htf_agree"], t["R"], t.get("score")))
+                     t["rr"], t["htf_agree"], t["R"], t.get("score"), t.get("mae_r"), t.get("entry_fee_frac")))
     conn.executemany("""
         INSERT INTO trades (symbol, side, entry, sl, tp, initial_sl, peak_price, size, notional, margin,
                             leverage, liquidation_price, trailing_enabled, strategy_name, status, open_time,
                             close_time, close_price, pnl, fee_cost, exit_type, result, rr_planned, htf_agree,
-                            r_multiple, score)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            r_multiple, score, mae_r, entry_fee_frac)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, rows)
     conn.executemany("""
         INSERT INTO signal_log (time, symbol, side, strategy_name, entry, sl, tp, rr, htf_agree, opened,

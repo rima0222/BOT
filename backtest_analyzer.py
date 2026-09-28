@@ -282,11 +282,51 @@ def analyze(conn, cfg, meta):
         "by_exit_type": by_exit_type_list,
         "by_strategy": by_strategy_list,
         "by_score": by_score_list,
+        "cut_loss_whatif": _cut_loss_whatif(conn, cfg),
         "signal_summary": signal_summary,
         "issues": issues,
         "verdict": verdict,
         "symbol_meta": meta.get("symbols", {}),
     }
+
+
+def _cut_loss_whatif(conn, cfg):
+    """
+    «اگه هر معامله‌ای که به ‎-xR رسید رو همون‌جا می‌بستیم چی می‌شد؟» — دقیق، معامله به معامله:
+    برای معاملاتی که قبل از خروج، بدترین حرکت خلافشون (MAE) به x رسیده، خروج در قیمت ورود ∓ x×ریسک
+    با کارمزد استاپ (تیکر + اسلیپیج) حساب می‌شه؛ بقیه‌ی معاملات همون نتیجه‌ی واقعی. (تاثیر جانبی روی
+    سرمایه/کول‌داون/حد ضرر روزانه‌ی معاملات بعدی لحاظ نشده — معمولاً ناچیزه.)
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(trades)").fetchall()}
+    if "mae_r" not in cols:
+        return []
+    rows = conn.execute("SELECT side, entry, initial_sl, size, pnl, exit_type, mae_r, entry_fee_frac FROM trades "
+                        "WHERE status='CLOSED' AND mae_r IS NOT NULL").fetchall()
+    if not rows:
+        return []
+    fs = float(getattr(cfg, "TAKER_FEE_PCT", 0.0)) / 100.0 + float(getattr(cfg, "TAKER_SLIPPAGE_PCT", 0.0)) / 100.0
+    actual = sum(r[4] for r in rows)
+    out = []
+    for x in (0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9):
+        touched = [r for r in rows if r[6] >= x - 1e-12]
+        new_total = actual
+        ended_sl = 0
+        recovered_pnl = 0.0
+        for side, entry, sl, size, pnl, et, mae, fi in touched:
+            risk = abs(entry - sl)
+            exit_px = entry - x * risk if side == "LONG" else entry + x * risk
+            new_pnl = -x * risk * size - (entry * size * (fi or 0.0) + exit_px * size * fs)
+            new_total += new_pnl - pnl
+            if et == "SL":
+                ended_sl += 1
+            else:
+                recovered_pnl += pnl
+        n = len(touched)
+        out.append({"cut_r": x, "touched": n, "touched_pct": round(n / len(rows) * 100, 1),
+                    "then_sl_pct": round(ended_sl / n * 100, 1) if n else 0.0,
+                    "recovered": n - ended_sl, "recovered_pnl": round(recovered_pnl, 2),
+                    "new_total_pnl": round(new_total, 2), "delta_pnl": round(new_total - actual, 2)})
+    return out
 
 
 def _summarize_signal_log(conn):

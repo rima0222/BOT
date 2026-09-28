@@ -586,6 +586,12 @@
           <div id="btIssuesList"></div>
         </div>
 
+        <div class="panel" style="background:#0a0e14;" id="btCutBox">
+          <div class="panel-head"><h2>✂️ اگه معامله‌ای که به ‎-xR رسید رو همون‌جا می‌بستیم؟</h2>
+            <span class="hint">دقیق، معامله به معامله (با کارمزد استاپ). «بعدش حد ضرر خورد» = از اون‌هایی که به ‎-xR رسیدن، چند درصد آخرش به حد ضرر کامل خوردن</span></div>
+          <div class="scrollbox"><table id="btCutLoss"><thead><tr><th>بستن در</th><th>چند معامله رسید</th><th>بعدش حد ضرر خورد</th><th>برگشتن (سودشون)</th><th>سود/زیان کل جدید</th><th>تغییر</th></tr></thead><tbody></tbody></table></div>
+        </div>
+
         <div class="cols2">
           <div class="panel" style="background:#0a0e14;">
             <div class="panel-head"><h2>شکست به تفکیک نماد (بدترین تا بهترین)</h2></div>
@@ -1318,6 +1324,14 @@ function renderBacktestResult(r){
   document.querySelector('#btByExitType tbody').innerHTML = r.by_exit_type.map(e => `
     <tr><td>${exitTypeBadge(e.exit_type)}</td><td>${e.trades}</td><td>${e.win_rate}%</td>
     <td class="${e.pnl>=0?'green':'red'}">${e.pnl>=0?'+':''}${e.pnl}</td></tr>`).join('');
+
+  const cut = r.cut_loss_whatif || [];
+  document.getElementById('btCutBox').style.display = cut.length ? 'block' : 'none';
+  document.querySelector('#btCutLoss tbody').innerHTML = cut.map(c => `
+    <tr><td dir="ltr">-${c.cut_r}R</td><td>${c.touched} (${c.touched_pct}%)</td><td>${c.then_sl_pct}%</td>
+    <td>${c.recovered} (<span class="${c.recovered_pnl>=0?'green':'red'}" dir="ltr">${c.recovered_pnl>=0?'+':''}${c.recovered_pnl}$</span>)</td>
+    <td class="${c.new_total_pnl>=0?'green':'red'}" dir="ltr">${c.new_total_pnl>=0?'+':''}${c.new_total_pnl}$</td>
+    <td class="${c.delta_pnl>=0?'green':'red'}" dir="ltr">${c.delta_pnl>=0?'+':''}${c.delta_pnl}$</td></tr>`).join('');
 
   document.querySelector('#btBySide tbody').innerHTML = Object.entries(r.by_side).map(([side,s]) => `
     <tr><td>${sideBadge(side)}</td><td>${s.trades}</td><td>${s.win_rate}%</td>

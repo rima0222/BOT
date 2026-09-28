@@ -511,6 +511,40 @@ def test_daily_loss_limit():
     print(f"  ✓ {rej} سیگنال به‌خاطر حد ضرر روزانه رد شد ({len(res_off['trades'])} → {len(res_on['trades'])} معامله)")
 
 
+def test_cut_loss_whatif():
+    print("۱۱) تحلیل «اگه در ‎-xR می‌بستیم» (MAE) == شبیه‌سازی واقعی با حد ضرر ‎-xR")
+    s = se.Series(synth(6000, seed=77), "15m")
+    sim = sim_engine.PathSim(s, [], 0.5, None)
+    rng = np.random.default_rng(12)
+    bad, n_touch, n = 0, 0, 0
+    for _ in range(800):
+        t0 = int(rng.integers(10, s.n - 300))
+        side = 1 if rng.random() < 0.5 else -1
+        entry = float(s.c[t0])
+        dist = entry * float(rng.uniform(0.003, 0.02))
+        sl = entry - dist if side == 1 else entry + dist
+        tp = entry + dist * 2.1 if side == 1 else entry - dist * 2.1
+        fb = rng.random() < 0.5
+        x = float(rng.choice([0.4, 0.6, 0.8]))
+        r = sim._run(t0, side, entry, sl, tp, False, 0, None, None, fb)
+        et = paper_trader.classify_exit_level(r[2], r[3], sl, entry, False)
+        mae = sim_engine.trade_mae_r(s, t0, r[0], side, entry, sl, et)
+        sl_cut = entry - x * dist if side == 1 else entry + x * dist
+        rc = sim._run(t0, side, entry, sl_cut, tp, False, 0, None, None, fb)
+        n += 1
+        if mae >= x - 1e-12:
+            n_touch += 1
+            ok = rc[2] == "STOP" and rc[0] <= r[0] and close_enough(rc[3], sl_cut)
+        else:
+            ok = rc[0] == r[0] and rc[2] == r[2] and close_enough(rc[1], r[1], 1e-12)
+        if not ok:
+            bad += 1
+            if bad <= 3:
+                check(False, f"t0={t0} side={side} x={x} mae={mae:.3f} اصلی={r[:4]} با‌حدضرر={rc[:4]}")
+    check(bad == 0 and n_touch > 50, f"MAE: {bad} عدم تطابق، {n_touch} لمس از {n}")
+    print(f"  ✓ {n} معامله ({n_touch} به ‎-xR رسیدن)")
+
+
 if __name__ == "__main__":
     t_start = time.time()
     test_strategy_equivalence()
@@ -523,6 +557,7 @@ if __name__ == "__main__":
     test_htf_weighted()
     test_live_process_bars()
     test_daily_loss_limit()
+    test_cut_loss_whatif()
     print()
     if FAILS:
         print(f"❌ {len(FAILS)} خطا")
