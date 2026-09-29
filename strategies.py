@@ -341,6 +341,165 @@ def generate_trend_follow(df, cfg):
     return res
 
 
+# ==================== فیبوناچی «حرکت دوم» (fib_phase) ====================
+FIB_COMPONENTS = ("zone", "rsi", "vol", "vp", "sr", "dow")
+FIB_LABELS = {"zone": "ناحیه‌ی طلایی فیبوناچی", "rsi": "RSI خنک‌شده و برگشته", "vol": "حجم اصلاح کمتر از حرکت اول",
+              "vp": "گره‌ی پرحجم (پروفایل حجم) در ناحیه", "sr": "سقف/کف شکسته‌شده در ناحیه", "dow": "روند داو هم‌جهت"}
+
+
+def volume_profile_hvn(h, l, c, v, a, b, bins, hvn_frac):
+    """پروفایل حجم کندل‌های a..b: حجم هر کندل در خونه‌ی قیمت معمولش ((سقف+کف+بسته)/۳).
+    خروجی: (کف، پهنای هر خونه، ماسک گره‌های پرحجم) یا None"""
+    hh = h[a:b + 1]
+    ll = l[a:b + 1]
+    lo = float(ll.min())
+    hi = float(hh.max())
+    if not hi > lo:
+        return None
+    tp = (hh + ll + c[a:b + 1]) / 3.0
+    idx = np.minimum(((tp - lo) / (hi - lo) * bins).astype(np.int64), bins - 1)
+    vol = np.bincount(idx, weights=v[a:b + 1], minlength=bins)
+    mx = float(vol.max())
+    if not mx > 0:
+        return None
+    return lo, (hi - lo) / bins, vol >= hvn_frac * mx
+
+
+def fib_eval(side, o, h, l, c, v, atr, rsi, trend, t, s, sh, sl, cfg):
+    """
+    ستاپ «حرکت دوم» فیبوناچی روی کندل t (بسته‌شده). مشترک بین ربات زنده و موتور بک‌تست.
+    sh/sl: اندیس سوینگ‌های سقف/کف تاییدشده داخل پنجره (صعودی). s: شروع پنجره.
+    trend: روند داو پنجره (۱، ۱-، ۰). خروجی: None یا {"sl", "score", "parts", "retr", ...}
+    """
+    a_t = float(atr[t])
+    if not (a_t > 0) or t - 1 < s:
+        return None
+    long = side == "LONG"
+    piv, prev = (sh, sl) if long else (sl, sh)
+    if len(piv) < 2 or len(prev) < 1:
+        return None
+    P = int(piv[-1])           # انتهای حرکت اول (سقف برای خرید، کف برای فروش)
+    Pp = int(piv[-2])          # سقف/کف قبلی
+    j = int(np.searchsorted(prev, P)) - 1
+    if j < 0:
+        return None
+    A = int(prev[j])           # شروع حرکت اول
+    if long:
+        top, bot = float(h[P]), float(l[A])
+        if cfg.FIB_REQUIRE_BREAK and not (top > float(h[Pp])):
+            return None
+    else:
+        top, bot = float(h[A]), float(l[P])
+        if cfg.FIB_REQUIRE_BREAK and not (bot < float(l[Pp])):
+            return None
+    imp = top - bot
+    if not (imp >= cfg.FIB_MIN_IMPULSE_ATR * a_t) or t <= P + 1:
+        return None
+    # حرکت دوم هنوز شروع نشده: از بعد از P تا کندل قبل، قیمت از انتهای حرکت اول رد نشده
+    if long:
+        if float(h[P + 1:t].max()) >= top or not (c[t] < top):
+            return None
+        p = P + 1 + int(np.argmin(l[P + 1:t + 1]))
+        retr = (top - float(l[p])) / imp
+    else:
+        if float(l[P + 1:t].min()) <= bot or not (c[t] > bot):
+            return None
+        p = P + 1 + int(np.argmax(h[P + 1:t + 1]))
+        retr = (float(h[p]) - bot) / imp
+    if not (cfg.FIB_ZONE_LO <= retr <= cfg.FIB_ZONE_HI) or t - p >= cfg.FIB_TRIGGER_BARS:
+        return None
+    # کندل برگشت (تایید با کندل بسته‌شده)
+    if long:
+        if not (c[t] > o[t] and c[t] > h[t - 1]):
+            return None
+        stop = float(l[p]) - cfg.FIB_SL_BUFFER_ATR * a_t
+        z_hi, z_lo = top - cfg.FIB_ZONE_LO * imp, top - cfg.FIB_ZONE_HI * imp
+    else:
+        if not (c[t] < o[t] and c[t] < l[t - 1]):
+            return None
+        stop = float(h[p]) + cfg.FIB_SL_BUFFER_ATR * a_t
+        z_lo, z_hi = bot + cfg.FIB_ZONE_LO * imp, bot + cfg.FIB_ZONE_HI * imp
+
+    parts = {}
+    parts["zone"] = 1.0 if retr >= cfg.FIB_GOLDEN else 0.5
+    rp = float(rsi[p]) if p - s >= int(cfg.RSI_PERIOD) else float("nan")
+    r_now, r_prev = float(rsi[t]), float(rsi[t - 1])
+    if long:
+        ok = rp <= cfg.FIB_RSI_LONG_MAX and r_now > r_prev
+    else:
+        ok = rp >= 100.0 - cfg.FIB_RSI_LONG_MAX and r_now < r_prev
+    parts["rsi"] = 1.0 if ok else 0.0
+    parts["vol"] = 1.0 if float(np.mean(v[P + 1:p + 1])) < float(np.mean(v[A + 1:P + 1])) else 0.0
+    a_vp = max(s, t - int(cfg.FIB_VP_BARS) + 1)
+    vp = volume_profile_hvn(h, l, c, v, a_vp, t, int(cfg.FIB_VP_BINS), float(cfg.FIB_VP_HVN))
+    hit = False
+    if vp is not None:
+        lo_vp, w_vp, hvn = vp
+        for k in np.flatnonzero(hvn).tolist():
+            b_lo = lo_vp + k * w_vp
+            if b_lo <= z_hi and b_lo + w_vp >= z_lo:
+                hit = True
+                break
+    parts["vp"] = 1.0 if hit else 0.0
+    lvl = float(h[Pp]) if long else float(l[Pp])
+    tol = cfg.FIB_SR_TOL_ATR * a_t
+    parts["sr"] = 1.0 if (z_lo - tol <= lvl <= z_hi + tol) else 0.0
+    parts["dow"] = 1.0 if trend == (1 if long else -1) else 0.0
+    wsum = 0.0
+    acc = 0.0
+    for k in FIB_COMPONENTS:
+        w = float(cfg.FIB_WEIGHTS.get(k, 0.0))
+        wsum = wsum + w
+        acc = acc + w * parts[k]
+    score = acc / wsum * 100.0 if wsum > 0 else 0.0
+    return {"sl": stop, "score": score, "parts": parts, "retr": retr, "impulse_start": A, "impulse_end": P,
+            "pullback": p}
+
+
+def generate_fib_phase(df, cfg):
+    """فیبوناچی «حرکت دوم» روی آخرین کندل بسته‌شده‌ی پنجره (config: FIB_*)."""
+    name = "fib_phase"
+    price = float(df["close"].iloc[-1])
+    res = {"trend": "sideways", "price": price, "support": None, "resistance": None, "atr": None,
+           "signal": None, "strategy": name, "score_long": 0.0, "score_short": 0.0}
+    n = len(df)
+    if n < 50:
+        return res
+    swing_highs, swing_lows = analysis.find_swings(df, order=cfg.SWING_ORDER)
+    trend = analysis.determine_trend(swing_highs, swing_lows)
+    support, resistance = analysis.get_support_resistance(swing_highs, swing_lows, price, cfg.SR_CLUSTER_PCT)
+    res.update({"trend": trend, "support": support, "resistance": resistance})
+    atr_s = analysis.compute_atr(df, cfg.ATR_PERIOD).values
+    atr = atr_s[-1]
+    if not (atr > 0):
+        return res
+    res["atr"] = float(atr)
+    o = df["open"].values.astype(float)
+    h = df["high"].values.astype(float)
+    l = df["low"].values.astype(float)
+    c = df["close"].values.astype(float)
+    v = df["volume"].values.astype(float)
+    rsi = indicators.rsi_sma(c, cfg.RSI_PERIOD)
+    sh = np.array([i for i, _ in swing_highs], dtype=np.int64)
+    sl = np.array([i for i, _ in swing_lows], dtype=np.int64)
+    tr = {"uptrend": 1, "downtrend": -1}.get(trend, 0)
+    min_score = float(cfg.WC_MIN_SCORE_PCT) - 1e-9
+    for side in ("LONG", "SHORT"):
+        st = fib_eval(side, o, h, l, c, v, atr_s, rsi, tr, n - 1, 0, sh, sl, cfg)
+        if st is None:
+            continue
+        res["score_long" if side == "LONG" else "score_short"] = round(st["score"], 1)
+        if st["score"] < min_score:
+            continue
+        sig = analysis.finalize_signal(side, price, st["sl"], None, float(atr), cfg, tp_uses_level=False)
+        if sig:
+            sig.update({"score": st["score"], "reasons": ["fib_" + k for k in FIB_COMPONENTS if st["parts"][k] > 0],
+                        "fib_retr": round(st["retr"], 3)})
+            res["signal"] = sig
+            return res
+    return res
+
+
 # ==================== مومنتوم نسبی هفتگی (cross-sectional momentum) ====================
 DAY_MS = 86_400_000
 
@@ -417,6 +576,11 @@ STRATEGY_REGISTRY = {
         "label": "روندگیر: شکست سقف/کف ۲۰ کندل، بدون سقف سود، تریلینگ شاندلیر",
         "short": "روندگیر",
     },
+    "fib_phase": {
+        "fn": generate_fib_phase,
+        "label": "فیبوناچی «حرکت دوم»: اصلاح به ناحیه‌ی طلایی + امتیاز (RSI، حجم، پروفایل حجم، سطح، داو)",
+        "short": "فیبوناچی حرکت دوم",
+    },
     "xs_momentum": {
         "fn": _xs_placeholder,
         "label": "مومنتوم نسبی هفتگی: خرید قوی‌ترین‌ها، فروش ضعیف‌ترین‌ها (فقط روزانه)",
@@ -463,7 +627,7 @@ def engine_names(cfg):
 def reason_labels(reasons):
     out = []
     for r in reasons or []:
-        out.append(COMPONENT_LABELS.get(r) or BREAKOUT_LABELS.get(r) or r)
+        out.append(COMPONENT_LABELS.get(r) or BREAKOUT_LABELS.get(r) or FIB_LABELS.get(str(r)[4:]) or r)
     return out
 
 

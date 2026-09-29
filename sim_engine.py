@@ -554,7 +554,9 @@ def metrics(trades, equity, start_balance, t_from=None, t_to=None):
                     "return_pct": 0.0, "max_dd_pct": 0.0, "pos_months_pct": 0.0, "fees": 0.0,
                     "long_trades": 0, "short_trades": 0, "avg_bars": 0.0, "wins": 0, "losses": 0,
                     "trail_trades": 0, "trail_pnl": 0.0, "trail_pct": 0.0, "early_trades": 0, "early_pnl": 0.0,
-                    "pos_rate": 0.0})
+                    "pos_rate": 0.0, "avg_week_usd": 0.0, "pos_weeks_pct": 0.0, "worst_week_usd": 0.0,
+                    "avg_month_usd": 0.0, "pos_months_all_pct": 0.0, "worst_month_usd": 0.0,
+                    "best_month_usd": 0.0, "trades_per_week": 0.0})
         return out
     rs = np.array([t["R"] for t in sel])
     pnls = np.array([t["pnl"] for t in sel])
@@ -588,6 +590,27 @@ def metrics(trades, equity, start_balance, t_from=None, t_to=None):
         key = datetime.utcfromtimestamp(t["close_time"] / 1000).strftime("%Y-%m")
         months[key] = months.get(key, 0.0) + t["pnl"]
     pos_months = sum(1 for v in months.values() if v > 0) / len(months) * 100 if months else 0.0
+    # درآمد هفتگی و ماهانه (دلار): همه‌ی هفته‌ها/ماه‌های بازه حساب می‌شن، حتی بدون معامله (= صفر)
+    span_lo = t_from if t_from is not None else min(t["open_time"] for t in sel)
+    span_hi = t_to if t_to is not None else max(t["close_time"] for t in sel)
+    if len(eq_t):
+        span_lo = min(span_lo, float(eq_t[0])) if t_from is None else span_lo
+        span_hi = max(span_hi, float(eq_t[-1])) if t_to is None else span_hi
+    WEEK = 7 * 86_400_000
+    wk0 = int(span_lo // WEEK)
+    n_weeks = max(1, int(span_hi // WEEK) - wk0 + 1)
+    weeks = np.zeros(n_weeks)
+    for t in sel:
+        k = min(n_weeks - 1, max(0, int(t["close_time"] // WEEK) - wk0))
+        weeks[k] += t["pnl"]
+    m0 = datetime.utcfromtimestamp(span_lo / 1000)
+    m1 = datetime.utcfromtimestamp(span_hi / 1000)
+    n_months = max(1, (m1.year - m0.year) * 12 + m1.month - m0.month + 1)
+    mvals = np.zeros(n_months)
+    for key, val in months.items():
+        y, mo = int(key[:4]), int(key[5:7])
+        k = (y - m0.year) * 12 + mo - m0.month
+        mvals[min(n_months - 1, max(0, k))] += val
 
     out.update({
         "win_rate": round(wins / (wins + losses) * 100, 2) if (wins + losses) else 0.0,
@@ -603,6 +626,14 @@ def metrics(trades, equity, start_balance, t_from=None, t_to=None):
         "return_pct": round(ret, 2),
         "max_dd_pct": round(dd, 2),
         "pos_months_pct": round(pos_months, 1),
+        "avg_week_usd": round(float(weeks.mean()), 2),
+        "pos_weeks_pct": round(float((weeks > 0).mean()) * 100, 1),
+        "worst_week_usd": round(float(weeks.min()), 2),
+        "avg_month_usd": round(float(mvals.mean()), 2),
+        "pos_months_all_pct": round(float((mvals > 0).mean()) * 100, 1),
+        "worst_month_usd": round(float(mvals.min()), 2),
+        "best_month_usd": round(float(mvals.max()), 2),
+        "trades_per_week": round(n / n_weeks, 2),
         "fees": round(float(sum(t["fee"] for t in sel)), 2),
         "long_trades": sum(1 for t in sel if t["side"] == "LONG"),
         "short_trades": sum(1 for t in sel if t["side"] == "SHORT"),

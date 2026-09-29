@@ -25,7 +25,7 @@ import sim_engine
 
 STRATEGIES = ["box_breakout", "weighted_confluence"]
 STRATEGY_LABELS = {"box_breakout": "شکست باکس", "weighted_confluence": "ترکیبی وزن‌دار", "trend_follow": "روندگیر",
-                   "xs_momentum": "مومنتوم هفتگی"}
+                   "xs_momentum": "مومنتوم هفتگی", "fib_phase": "فیبوناچی حرکت دوم"}
 TRAIL_FA = {"strict": "تریلینگ سخت‌گیر", "tight": "تریلینگ حساس", "balanced": "تریلینگ متعادل", "loose": "تریلینگ پلکانی"}
 TF_LABELS = {"1m": "۱ دقیقه (اسکلپ)", "5m": "۵ دقیقه (اسکلپ)", "15m": "۱۵ دقیقه", "1h": "۱ ساعته", "4h": "۴ ساعته",
              "1d": "روزانه"}
@@ -63,6 +63,9 @@ def describe(conf):
     parts = [TF_LABELS.get(conf.get("timeframe"), conf.get("timeframe", "")), _strat_label(conf)]
     if "weighted_confluence" in acts:
         parts.append(f"امتیاز ≥ {conf.get('min_score') or 70:g}")
+    elif "fib_phase" in acts:
+        ms = conf.get("min_score") or 0
+        parts.append(f"امتیاز ≥ {ms:.0f}" if ms > 0 else "بدون حداقل امتیاز")
     only_trend = acts == ["trend_follow"]
     parts += [htf_txt] + ([] if only_trend else [_trail_txt(conf["trailing"])])
     if "box_breakout" in acts:
@@ -242,6 +245,13 @@ def run_timeframe(preps, symbols, cfg, tf, start_ms, end_ms, grid="quick", progr
                     for cut in (0.0, 0.6):
                         confs.append(_conf(tf, combo, 70 if "weighted_confluence" in combo else None, st, htf,
                                            trailing, True, False, False, False, True, False, True, cut))
+    elif grid == "fib":
+        # فیبوناچی «حرکت دوم»: حداقل امتیاز × مدیریت (RR2 ثابت / بستن در ‎-0.5R / تریلینگ سخت‌گیر / هر دو) × تایید HTF
+        for htf, st in [(False, "normal"), (True, "normal")]:
+            for ms in (0.0, 50.0, 66.0, 83.0):
+                for trailing, cut in ((False, 0.0), (False, 0.5), ("strict", 0.0), ("strict", 0.5)):
+                    confs.append(_conf(tf, "fib_phase", ms, st, htf, trailing, False, False, False, False,
+                                       False, False, True, cut))
     elif grid == "focus":
         # فقط شکست باکس؛ فیلترهای قدیمی خاموش؛ فقط گزینه‌های جدید با هم مقایسه می‌شن
         for htf, st in [(True, "loose"), (True, "normal"), (False, "normal")]:
@@ -281,7 +291,7 @@ def run_timeframe(preps, symbols, cfg, tf, start_ms, end_ms, grid="quick", progr
         try:
             conf = {"min_score": cfg.WC_MIN_SCORE_PCT, "retest": False, "early_exit": False, "daily_loss": False,
                     "cut": 0.0, **conf}
-            if _strat(conf) != "weighted_confluence":
+            if _strat(conf) not in ("weighted_confluence", "fib_phase"):
                 conf["min_score"] = None
             _, m = evaluate(preps, order, cfg, conf, split_ms)
             row = {"name": name, "config": conf, **m}
@@ -389,7 +399,7 @@ def _paired_effects(results):
             ("retest", "ورود با پولبک (در برابر ورود روی کندل شکست)"),
             ("early_exit", "خروج زودهنگام (اگه تا چند کندل جلو نرفت)"),
             ("daily_loss", "حد ضرر روزانه"),
-            ("cut", "بستن در ‎-0.6R (در برابر حد ضرر کامل)")]
+            ("cut", "بستن زودتر در ضرر (‎-0.5R / ‎-0.6R) در برابر حد ضرر کامل")]
 
     def summarize(dim, label, pairs):
         d = [a["full"]["avg_r"] - b["full"]["avg_r"] for a, b in pairs]
@@ -455,6 +465,21 @@ def _paired_effects(results):
                 pairs.append((a, b))
         if pairs:
             out.append(summarize(f"min_score:{sc:g}", f"حداقل امتیاز {sc:g} به‌جای ۷۰", pairs))
+
+    # فیبوناچی: امتیاز کیفیت واقعاً کمک می‌کنه؟ (حداقل امتیاز در برابر بدون حداقل، بقیه یکسان)
+    by_fib = defaultdict(dict)
+    for r in results:
+        if (r["config"].get("active_strategies") or []) != ["fib_phase"]:
+            continue
+        by_fib[keyf(r["config"], "min_score")][r["config"].get("min_score")] = r
+    for sc in (50.0, 66.0, 83.0):
+        pairs = []
+        for g in by_fib.values():
+            a, b = g.get(sc), g.get(0.0)
+            if a and b and a["full"]["trades"] >= 10 and b["full"]["trades"] >= 10:
+                pairs.append((a, b))
+        if pairs:
+            out.append(summarize(f"fib_score:{sc:g}", f"فیبوناچی: حداقل امتیاز {sc:g} به‌جای بدون حداقل", pairs))
 
     by_key = defaultdict(dict)
     for r in results:

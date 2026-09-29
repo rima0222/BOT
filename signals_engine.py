@@ -26,7 +26,7 @@ import indicators as ind
 import market_data
 import money
 
-STRATEGY_NAMES = ["weighted_confluence", "box_breakout", "box_breakout@retest", "trend_follow"]
+STRATEGY_NAMES = ["weighted_confluence", "box_breakout", "box_breakout@retest", "trend_follow", "fib_phase"]
 LONG, SHORT = 1, -1
 
 
@@ -222,7 +222,46 @@ def compute_structural(series, cfg, first_idx=0):
         out.update(_structural_breakout(series, cfg, ctx))
     if "trend_follow" in names:
         out["trend_follow"] = _structural_trend(series, cfg, ctx)
+    if "fib_phase" in names:
+        out["fib_phase"] = _structural_fib(series, cfg, ctx, W)
     return out
+
+
+def _structural_fib(series, cfg, ctx, W):
+    """
+    معادل strategies.generate_fib_phase. پیش‌فیلتر وکتوریزه (کندل برگشتی لازم)، بعد برای هر کاندید
+    دقیقاً همون تابع مشترک strategies.fib_eval با سوینگ‌های تاییدشده‌ی همون پنجره صدا زده می‌شه.
+    """
+    import strategies
+    n = series.n
+    o, h, l, c, v = series.o, series.h, series.l, series.c, series.v
+    atr, atr_ok, in_range, trend = ctx["atr"], ctx["atr_ok"], ctx["in_range"], ctx["trend"]
+    sh_pos, sl_pos = ctx["sh_pos"], ctx["sl_pos"]
+    a_h, b_h, a_l, b_l = ctx["bounds"]
+    wlen = ctx["wlen"]
+    rsi = ind.rsi_sma(c, int(cfg.RSI_PERIOD))
+    h_p, l_p = _prev(h), _prev(l)
+    with np.errstate(invalid="ignore"):
+        base = in_range & atr_ok & (wlen >= 50)
+        cand_l = base & (c > o) & (c > h_p)
+        cand_s = base & (c < o) & (c < l_p)
+    cols = {1: ([], [], []), -1: ([], [], [])}
+    for side_code, cand, name in ((1, cand_l, "LONG"), (-1, cand_s, "SHORT")):
+        for t in np.flatnonzero(cand).tolist():
+            s0 = max(0, t - W + 1)
+            st = strategies.fib_eval(name, o, h, l, c, v, atr, rsi, int(trend[t]), t, s0,
+                                     sh_pos[a_h[t]:b_h[t]], sl_pos[a_l[t]:b_l[t]], cfg)
+            if st is not None:
+                cols[side_code][0].append(t)
+                cols[side_code][1].append(st["sl"])
+                cols[side_code][2].append(st["score"])
+
+    def mk(side_code):
+        idx = np.array(cols[side_code][0], dtype=np.int64)
+        return Structural(idx, np.array(cols[side_code][1], dtype=np.float64), np.full(len(idx), np.nan), atr[idx],
+                          False, np.array(cols[side_code][2], dtype=np.float64), use_score=True)
+
+    return (mk(1), mk(-1))
 
 
 def _structural_trend(series, cfg, ctx):

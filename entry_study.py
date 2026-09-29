@@ -45,7 +45,7 @@ BRACKET_KEYS = ["1_1", "2_1", "3_1", "2_05"]
 BRACKET_FA = ["+1R قبل از −1R", "+2R قبل از −1R", "+3R قبل از −1R", "+2R قبل از −0.5R"]
 MAIN_B = 1   # براکت اصلی برای تحلیل فیلترها: RR2 (هدف ربات)
 
-STRATEGY_SIGNALS = ["weighted_confluence", "box_breakout", "box_breakout@retest", "trend_follow"]
+STRATEGY_SIGNALS = ["weighted_confluence", "box_breakout", "box_breakout@retest", "trend_follow", "fib_phase"]
 RAW_SIGNALS = ["donch20", "donch55", "ma_cross", "dow_flip", "pullback_trend", "rsi_revert", "bb_revert",
                "squeeze_break", "vol_spike", "big_candle", "btc_lead"]
 
@@ -55,6 +55,7 @@ SIG_FA = {
     "box_breakout": "شکست باکس (استراتژی ربات)",
     "box_breakout@retest": "شکست باکس + پولبک (استراتژی ربات)",
     "trend_follow": "روندگیر دونچیان (استراتژی ربات)",
+    "fib_phase": "فیبوناچی حرکت دوم (همه‌ی امتیازها)",
     "xs_momentum": "مومنتوم هفتگی (استراتژی ربات)",
     "donch20": "شکست سقف/کف ۲۰ کندل",
     "donch55": "شکست سقف/کف ۵۵ کندل",
@@ -86,6 +87,7 @@ FEATURES = [
     ("btc_bar", "حرکت آخرین کندل BTC (ATR، هم‌جهت)", "q", None),
     ("hour", "ساعت بسته‌شدن کندل (UTC)", "bins", [0, 4, 8, 12, 16, 20, 24]),
     ("weekend", "آخر هفته", "cat", {1: "شنبه/یکشنبه", 0: "روزهای کاری"}),
+    ("score", "امتیاز کیفیت استراتژی (فیبوناچی/ترکیبی)", "bins", [0, 34, 50, 67, 84, 100.01]),
 ]
 SIDED = {"trend", "btc", "ma_dist", "mom20", "body", "btc_bar"}
 
@@ -357,50 +359,53 @@ class Study:
         for sname in STRATEGY_SIGNALS:
             if sname not in prep.structural:
                 continue
-            f = prep.finals(sname, variant)
+            # فیبوناچی: همه‌ی امتیازها (حداقل امتیاز صفر)؛ اثر امتیاز در تحلیل فیلترها («امتیاز کیفیت») دیده می‌شه
+            f = prep.finals(sname, dict(variant, min_score=0.0) if sname == "fib_phase" else variant)
             if len(f.idx) == 0:
                 continue
             for sd in (se.LONG, se.SHORT):
                 m = f.side == sd
                 if not m.any():
                     continue
-                idx, ent, sl = f.idx[m].astype(np.int64), f.entry[m], f.sl[m]
-                groups.append((sname, sd, idx, ent, sl, sname.endswith("@retest")))
+                idx, ent, sl, sc = f.idx[m].astype(np.int64), f.entry[m], f.sl[m], f.score[m]
+                groups.append((sname, sd, idx, ent, sl, sname.endswith("@retest"), sc))
                 hw = F["htf_l"][idx] if sd == se.LONG else F["htf_s"][idx]
                 req = self.htf_req[0] if sd == se.LONG else self.htf_req[1]
                 k = hw >= req - 1e-9
-                groups.append((sname + "|htf", sd, idx[k], ent[k], sl[k], sname.endswith("@retest")))
+                groups.append((sname + "|htf", sd, idx[k], ent[k], sl[k], sname.endswith("@retest"), sc[k]))
         if xs_final is not None and len(xs_final.idx):
             for sd in (se.LONG, se.SHORT):
                 m = xs_final.side == sd
                 if m.any():
                     groups.append(("xs_momentum", sd, xs_final.idx[m].astype(np.int64), xs_final.entry[m],
-                                   xs_final.sl[m], False))
+                                   xs_final.sl[m], False, None))
         for name, (Lm, Sm) in raw_signals(prep, F, is_btc).items():
             for sd, mask in ((se.LONG, Lm), (se.SHORT, Sm)):
                 idx = np.flatnonzero(mask & bar_ok)
-                groups.append((name, sd, idx, s.c[idx], None, False))
+                groups.append((name, sd, idx, s.c[idx], None, False, None))
         # پایه: نمونه‌ی منظم از همه‌ی کندل‌ها
         cand = np.flatnonzero(bar_ok & (ar + H + 1 <= n - 1))
         if len(cand):
             step = max(1, len(cand) // max(1, base_samples // 2))
             bidx = cand[::step]
             for sd in (se.LONG, se.SHORT):
-                groups.append(("base", sd, bidx, s.c[bidx], None, False))
+                groups.append(("base", sd, bidx, s.c[bidx], None, False, None))
 
-        cols = {k: [] for k in ("sig", "side", "idx", "entry", "sl", "retest")}
-        for name, sd, idx, ent, sl, retest in groups:
+        cols = {k: [] for k in ("sig", "side", "idx", "entry", "sl", "retest", "score")}
+        for name, sd, idx, ent, sl, retest, sc in groups:
             if name not in self.code:
                 continue
             if len(idx):
                 ok = bar_ok[idx]
                 idx, ent = idx[ok], ent[ok]
                 sl = None if sl is None else sl[ok]
+                sc = None if sc is None else sc[ok]
             if name != "base" and len(idx):
                 keep = dedupe(idx, self.gap)
                 sel = np.searchsorted(idx, keep)
                 idx, ent = idx[sel], ent[sel]
                 sl = None if sl is None else sl[sel]
+                sc = None if sc is None else sc[sel]
             self._count(name, sd, "signals", len(idx))
             if not len(idx):
                 continue
@@ -410,6 +415,7 @@ class Study:
             cols["entry"].append(np.asarray(ent, dtype=np.float64))
             cols["sl"].append(np.full(len(idx), np.nan) if sl is None else np.asarray(sl, dtype=np.float64))
             cols["retest"].append(np.full(len(idx), bool(retest)))
+            cols["score"].append(np.full(len(idx), np.nan) if sc is None else np.asarray(sc, dtype=np.float64))
         if not cols["sig"]:
             if keep_part:
                 self.merge_counts(self._cur)
@@ -481,6 +487,7 @@ class Study:
             "btc_bar": F["btc_bar"][idx] * sgn,
             "hour": F["hour"][idx] if self.tf != "1d" else np.full(m, np.nan),
             "weekend": F["weekend"][idx],
+            "score": E["score"],
         }
         part = {
             "sig": E["sig"], "side": E["side"], "sym": np.full(m, self.sym_code.get(prep.symbol, -1), dtype=np.int16),

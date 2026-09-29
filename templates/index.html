@@ -484,6 +484,7 @@
       </div>
       <div class="controls-row" style="background:rgba(63,185,80,.08); padding:10px; border-radius:8px;">
         <button id="cmpAllBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">🏆 مقایسه‌ی همه‌ی استراتژی‌ها با یک کلیک</button>
+        <button id="cmpFibBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">📐 تست فیبوناچی با یک کلیک</button>
         <span class="hint">روندگیر، شکست باکس، ترکیبی وزن‌دار و ترکیب‌هاشون — با/بدون تایید HTF، تریلینگ، پولبک، خروج زودهنگام، بستن در ‎-0.6R —
           + روی روزانه: روندگیر و مومنتوم هفتگی — روی ۱۵ دقیقه، ۱ ساعته، ۴ ساعته و روزانه، ۲ سال، ۳۰ نماد. یک گزارش، با بهترین انتخاب و دکمه‌ی اعمال روی ربات.</span>
       </div>
@@ -508,6 +509,7 @@
         <label>دامنه:</label>
         <select id="cmpGrid" style="width:260px;">
           <option value="all" selected>🏆 همه‌ی استراتژی‌ها و ترکیب‌ها — حدود ۷۰ تنظیم برای هر تایم‌فریم</option>
+          <option value="fib">📐 فیبوناچی حرکت دوم — حداقل امتیاز × (RR2 ثابت / بستن در ‎-0.5R / تریلینگ / هر دو) × HTF — ۳۲ تنظیم</option>
           <option value="focus">🎯 فقط شکست باکس + گزینه‌هاش — ۲۴۰ تنظیم</option>
           <option value="quick">سریع، هر دو استراتژی — حدود ۷۰۰ تنظیم برای هر تایم‌فریم</option>
           <option value="full">کامل — چند هزار تنظیم برای هر تایم‌فریم (خیلی طولانی‌تر)</option>
@@ -781,7 +783,7 @@ function resultBadge(result, et){
 }
 
 const STRAT_FA = {weighted_confluence: 'ترکیبی وزن‌دار', box_breakout: 'شکست باکس', 'box_breakout@retest': 'شکست باکس (پولبک)',
-                  trend_follow: 'روندگیر', xs_momentum: 'مومنتوم هفتگی'};
+                  trend_follow: 'روندگیر', xs_momentum: 'مومنتوم هفتگی', fib_phase: 'فیبوناچی حرکت دوم'};
 function stratName(n){ return STRAT_FA[n] || n || '—'; }
 function htfTxt(v){ return (v === null || v === undefined) ? '—' : (v > 5 || window.__htfWeighted ? v + '٪' : v + '/5'); }
 
@@ -1002,11 +1004,12 @@ async function refresh(){
     if(!stSel.options.length) stSel.innerHTML = Object.entries(data.strategy_labels).map(([k,l]) => `<option value="${k}">${l}</option>`).join('');
     if(document.activeElement.id !== 'strategySelect') stSel.value = data.strategy;
     const acts = String(data.strategy).split('+');
-    const isWc = acts.includes('weighted_confluence');
+    const isWc = acts.includes('weighted_confluence') || acts.includes('fib_phase');
     document.getElementById('wcBox').style.display = isWc ? '' : 'none';
     const infos = [];
     if(acts.includes('box_breakout')) infos.push(`شکست باکس ${data.breakout.box_bars} کندلی یا حمایت/مقاومت با کندل بسته، حجم ≥ ${data.breakout.vol_mult}× میانگین`);
     if(acts.includes('xs_momentum')) infos.push(`مومنتوم هفتگی: هر دوشنبه ${data.xs_info.universe} نماد پرحجم بر اساس بازده ${data.xs_info.lookback} روز رتبه‌بندی؛ ${data.xs_info.top_k} تای قوی خرید${data.xs_info.short ? `، ${data.xs_info.top_k} تای ضعیف فروش` : ''}؛ نگه‌داری ${data.xs_info.hold} روز` + (data.timeframe !== '1d' ? ' ⚠️ فقط با تایم‌فریم «روزانه» کار می‌کنه' : ''));
+    if(acts.includes('fib_phase')) infos.push(`فیبوناچی حرکت دوم: حرکت اول ≥ ${data.fib_info.impulse}×ATR که سقف/کف قبلی رو شکسته، اصلاح به ناحیه‌ی ${data.fib_info.zone} و کندل برگشتی بسته‌شده؛ حد ضرر پشت کف/سقف اصلاح، حد سود RR2؛ امتیاز: ناحیه‌ی طلایی، RSI، حجم اصلاح، پروفایل حجم ${data.fib_info.vp} کندل، سطح شکسته‌شده، روند داو (حداقل امتیاز از همون «حداقل امتیاز ورود»)`);
     if(acts.includes('trend_follow')) infos.push(`روندگیر: شکست سقف/کف ${data.trend_info.bars} کندل هم‌جهت SMA${data.trend_info.ma}، حد ضرر ${data.trend_info.sl_atr}×ATR، بدون حد سود ثابت، ${data.trend_info.trail}`);
     document.getElementById('brkInfo').style.display = infos.length ? '' : 'none';
     document.getElementById('brkInfo').innerText = infos.length ? '(' + infos.join(' | ') + ')' : '';
@@ -1018,9 +1021,10 @@ async function refresh(){
 
     const msSel = document.getElementById('minScoreSelect');
     if(!msSel.options.length){
-      msSel.innerHTML = data.score_choices.map(x => `<option value="${x}">${x} از ۱۰۰</option>`).join('');
-      document.getElementById('weightsInfo').innerText = '(' + Object.entries(data.weights).map(([k,w]) => `${data.component_labels[k]} ${w}`).join('، ') + ')';
+      msSel.innerHTML = data.score_choices.map(x => `<option value="${x}">${x > 0 ? x + ' از ۱۰۰' : 'بدون حداقل'}</option>`).join('');
     }
+    document.getElementById('weightsInfo').innerText = String(data.strategy).split('+').includes('weighted_confluence')
+      ? '(' + Object.entries(data.weights).map(([k,w]) => `${data.component_labels[k]} ${w}`).join('، ') + ')' : '';
     if(document.activeElement.id !== 'minScoreSelect') msSel.value = String(data.min_score).replace(/\.0$/, '');
     const tfSel = document.getElementById('timeframeSelect');
     if(!tfSel.options.length){
@@ -1490,8 +1494,11 @@ const STRICT_LABEL = {loose:'سبک‌گیر', normal:'معمولی', strict:'س
 
 function rCell(v){ if(v===null||v===undefined) return '—'; return `<span class="${v>=0?'num-pos':'num-neg'}" dir="ltr">${v>=0?'+':''}${Number(v).toFixed(3)}R</span>`; }
 function pctCell(v){ if(v===null||v===undefined) return '—'; return `<span class="${v>=0?'num-pos':'num-neg'}" dir="ltr">${v>=0?'+':''}${fmt(v,1)}%</span>`; }
+function usdCell(v){ if(v===null||v===undefined) return '—'; return `<span class="${v>=0?'num-pos':'num-neg'}" dir="ltr">${v>=0?'+':''}${Number(v).toFixed(1)}$</span>`; }
 function segCells(m){
-  return `<td>${m.trades}</td><td>${m.pos_rate ?? m.win_rate}%</td><td>${rCell(m.avg_r)}</td><td>${m.profit_factor}</td><td>${pctCell(m.return_pct)}</td><td>${m.max_dd_pct}%</td>`;
+  return `<td>${m.trades}</td><td>${m.pos_rate ?? m.win_rate}%</td><td>${rCell(m.avg_r)}</td><td>${m.profit_factor}</td><td>${pctCell(m.return_pct)}</td><td>${m.max_dd_pct}%</td>
+    <td>${usdCell(m.avg_week_usd)} <span class="hint">(${m.pos_weeks_pct ?? '—'}٪ هفته‌ها مثبت، ${m.trades_per_week ?? '—'} معامله در هفته)</span></td>
+    <td>${usdCell(m.avg_month_usd)} <span class="hint">(بدترین ${usdCell(m.worst_month_usd)}، بهترین ${usdCell(m.best_month_usd)})</span></td>`;
 }
 
 document.getElementById('cmpAllBtn').addEventListener('click', () => {
@@ -1499,6 +1506,14 @@ document.getElementById('cmpAllBtn').addEventListener('click', () => {
   document.getElementById('cmpTopN').value = '30';
   document.getElementById('cmpGrid').value = 'all';
   document.querySelectorAll('#cmpTfChecks input').forEach(x => x.checked = ['15m', '1h', '4h', '1d'].includes(x.dataset.tf));
+  document.getElementById('cmpStartBtn').click();
+});
+
+document.getElementById('cmpFibBtn').addEventListener('click', () => {
+  document.getElementById('cmpDays').value = '730';
+  document.getElementById('cmpTopN').value = '30';
+  document.getElementById('cmpGrid').value = 'fib';
+  document.querySelectorAll('#cmpTfChecks input').forEach(x => x.checked = ['1h', '4h', '1d'].includes(x.dataset.tf));
   document.getElementById('cmpStartBtn').click();
 });
 
@@ -1638,7 +1653,7 @@ function renderCompareReport(r){
   const dt = ms => new Date(ms).toLocaleDateString('fa-IR');
   const tfMeta = (x) => (m.timeframes || {})[x.config.timeframe] || m;
   const segTable = (x) => { const t = tfMeta(x); return `
-    <table class="mini"><thead><tr><th>بخش</th><th>معاملات</th><th>٪ سودده</th><th>میانگین R</th><th>ضریب سود</th><th>بازده</th><th>بیشینه افت</th></tr></thead><tbody>
+    <table class="mini"><thead><tr><th>بخش</th><th>معاملات</th><th>٪ سودده</th><th>میانگین R</th><th>ضریب سود</th><th>بازده</th><th>بیشینه افت</th><th>درآمد هفتگی</th><th>درآمد ماهانه</th></tr></thead><tbody>
       <tr><td>آموزش (${dt(t.start_ms)} تا ${dt(t.split_ms)})</td>${segCells(x.is)}</tr>
       <tr><td><b>آزمون — دیده‌نشده</b> (${dt(t.split_ms)} تا ${dt(t.end_ms)})</td>${segCells(x.oos)}</tr>
       <tr><td>کل بازه</td>${segCells(x.full)}</tr>
@@ -1683,10 +1698,11 @@ function renderCompareReport(r){
       <td>${rCell(x.best_is.avg_r)}</td><td>${x.best_oos.trades}</td><td>${rCell(x.best_oos.avg_r)}</td><td>${pctCell(x.best_oos.return_pct)}</td></tr>`).join('') + '</tbody>';
 
   document.getElementById('cmpTop').innerHTML = `<thead><tr><th>#</th><th>تنظیم</th><th>آموزش: معاملات</th><th>٪ سودده</th><th>R</th><th>کران پایین R</th>
-      <th>آزمون: معاملات</th><th>٪ سودده</th><th>R</th><th>ضریب سود</th><th>بازده</th><th>افت</th><th>قبول؟</th><th></th></tr></thead><tbody>` +
+      <th>آزمون: معاملات</th><th>٪ سودده</th><th>R</th><th>ضریب سود</th><th>بازده</th><th>افت</th><th>آزمون: $ در هفته</th><th>$ در ماه</th><th>قبول؟</th><th></th></tr></thead><tbody>` +
     r.top.map((x,i) => `<tr><td>${i+1}</td><td style="white-space:normal; max-width:360px;">${x.label}</td>
       <td>${x.is.trades}</td><td>${x.is.pos_rate ?? x.is.win_rate}%</td><td>${rCell(x.is.avg_r)}</td><td>${rCell(x.is.r_lcb)}</td>
       <td>${x.oos.trades}</td><td>${x.oos.pos_rate ?? x.oos.win_rate}%</td><td>${rCell(x.oos.avg_r)}</td><td>${x.oos.profit_factor}</td><td>${pctCell(x.oos.return_pct)}</td><td>${x.oos.max_dd_pct}%</td>
+      <td>${usdCell(x.oos.avg_week_usd)} <span class="hint">${x.oos.pos_weeks_pct ?? '—'}٪+</span></td><td>${usdCell(x.oos.avg_month_usd)}</td>
       <td>${x.eligible ? (x.oos_ok ? '✅' : '❌') : '<span class="hint">کم‌نمونه</span>'}</td><td>${configButtons(i,'top')}</td></tr>`).join('') + '</tbody>';
 
   const failed = [];

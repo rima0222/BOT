@@ -59,7 +59,7 @@ def main():
     ap.add_argument("--symbols", type=str, default="", help="لیست نماد با کاما (به‌جای --top)")
     ap.add_argument("--timeframes", type=str, default="15m,1h,4h",
                     help="تایم‌فریم‌ها با کاما: 1m,5m (اسکلپ) 15m,1h,4h (نوسان‌گیری)")
-    ap.add_argument("--grid", choices=["quick", "full", "focus", "all"], default="quick",
+    ap.add_argument("--grid", choices=["quick", "full", "focus", "all", "fib"], default="quick",
                     help="focus = فقط استراتژی شکست باکس و گزینه‌های جدیدش (سریع)")
     ap.add_argument("--job-id", type=str, default="")
     ap.add_argument("--progress-file", type=str, default="")

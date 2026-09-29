@@ -148,7 +148,7 @@ class SymbolPrep:
         self._finals = {}
 
     def finals(self, name, variant):
-        uses_score = name == "weighted_confluence"
+        uses_score = name in ("weighted_confluence", "fib_phase")
         if name.endswith("@retest") and variant.get("net"):
             # ورود پولبک همیشه لیمیته: کارمزد ورود = میکر (همون money.fee_fracs با ورود لیمیت)
             net = variant["net"]

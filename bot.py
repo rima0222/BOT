@@ -42,6 +42,18 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 3 * 1024 * 1024 * 1024   # آپلود فایل دیتای تاریخی (تا ۳ گیگ)
 conn = paper_trader.get_conn(config.DB_PATH)
 
+
+
+def _apply_live_defaults_v14():
+    """یک‌بار: ربات زنده با فیبوناچی «حرکت دوم» و تنظیمات پیش‌فرضش (config.FIB_LIVE_DEFAULTS)."""
+    if paper_trader.get_setting(conn, "defaults_v14", None) is not None:
+        return
+    for k, v in config.FIB_LIVE_DEFAULTS.items():
+        paper_trader.set_setting(conn, k, v)
+    paper_trader.set_setting(conn, "defaults_v14", "1")
+    log.info(f"[نسخه‌ی ۱۴] تنظیمات پیش‌فرض فیبوناچی روی ربات زنده اعمال شد: {config.FIB_LIVE_DEFAULTS}")
+
+
 # پیش‌گرم‌کردن اندازه‌گیری CPU (اولین فراخوانی psutil.cpu_percent همیشه ۰ برمی‌گردونه)
 psutil.cpu_percent(interval=None)
 
@@ -669,6 +681,8 @@ def api_data():
         "trail_profile": settings["trail_profile"],
         "trail_profiles": {k: v["label"] for k, v in config.TRAIL_PROFILES.items()},
         "strategy": settings["strategy"],
+        "fib_info": {"impulse": config.FIB_MIN_IMPULSE_ATR, "zone": f"{config.FIB_ZONE_LO:g} تا {config.FIB_ZONE_HI:g}",
+                     "vp": config.FIB_VP_BARS},
         "strategy_labels": {**{k: v["short"] for k, v in strategies.STRATEGY_REGISTRY.items()},
                             **strategies.STRATEGY_COMBOS},
         "cut_loss_r": settings["cut_loss_r"],
@@ -1233,7 +1247,7 @@ def api_compare_start():
     body = request.get_json(force=True, silent=True) or {}
     days = max(60, min(int(body.get("days", 365)), 1095))
     top_n = max(3, min(int(body.get("top_n", 20)), 60))
-    grid = body.get("grid") if body.get("grid") in ("full", "focus", "all") else "quick"
+    grid = body.get("grid") if body.get("grid") in ("full", "focus", "all", "fib") else "quick"
     tfs = [t for t in (body.get("timeframes") or ["15m", "1h", "4h"]) if t in config.TIMEFRAME_PROFILES]
     if not tfs:
         return jsonify({"ok": False, "error": "حداقل یک تایم‌فریم انتخاب کن"}), 400
@@ -1779,6 +1793,7 @@ def api_data_cache():
 
 
 if __name__ == "__main__":
+    _apply_live_defaults_v14()
     scheduler.start()
     threading.Thread(target=_auto_resume_entry, daemon=True).start()
     log.info("ربات معامله‌گر مجازی استارت شد.")

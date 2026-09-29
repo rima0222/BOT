@@ -148,7 +148,8 @@ def test_combined_live_wrapper():
     arr = synth(1800, seed=11)
     series = se.Series(arr, "15m")
     for name in se.STRATEGY_NAMES:
-        cfg = make_cfg(WC_MIN_SCORE_PCT=60, MIN_SL_PCT=0.3, ACTIVE_STRATEGIES=[name.split("@")[0]],
+        cfg = make_cfg(WC_MIN_SCORE_PCT=0 if name == "fib_phase" else 60, MIN_SL_PCT=0.3,
+                       ACTIVE_STRATEGIES=[name.split("@")[0]],
                        BRK_ENTRY="retest" if name.endswith("@retest") else "close")
         check(strategies.engine_name(cfg) == name, f"engine_name اشتباه برای {name}")
         W = cfg.CANDLE_LIMIT
@@ -637,6 +638,48 @@ def test_xs_momentum():
     print(f"  ✓ {len(eng)} انتخاب هفتگی یکسان؛ {len(tr)} معامله ({longs} خرید)، انواع خروج {sorted(types)}")
 
 
+def test_fib_dense():
+    print("۱۳) فیبوناچی حرکت دوم: همه‌ی کندل‌ها (بدون حداقل امتیاز) موتور == ربات زنده، + اجرای سبد")
+    total = 0
+    mism = 0
+    for seed, over in ((71, {}), (72, {"FIB_ZONE_LO": 0.382, "FIB_REQUIRE_BREAK": False, "FIB_MIN_IMPULSE_ATR": 1.5}),
+                       (73, {"FIB_WEIGHTS": {"zone": 2.0, "rsi": 1.0, "vol": 0.5, "vp": 1.5, "sr": 1.0, "dow": 0.0},
+                             "FIB_TRIGGER_BARS": 5})):
+        arr = synth(1800, seed=seed)
+        series = se.Series(arr, "15m")
+        cfg = make_cfg(WC_MIN_SCORE_PCT=0, ACTIVE_STRATEGIES=["fib_phase"], **over)
+        W = cfg.CANDLE_LIMIT
+        structural = se.compute_structural(series, cfg, 0)
+        variant = fast_backtest.variant_from_cfg(cfg)
+        prep_like = fast_backtest.SymbolPrep("T", series, structural, None, None, None, 0, cfg)
+        f = prep_like.finals("fib_phase", variant)
+        eng = {int(i): k for k, i in enumerate(f.idx)}
+        for t in range(W - 1, series.n):
+            live = strategies.generate_fib_phase(series.to_df(t - W + 1, t + 1), cfg).get("signal")
+            k = eng.get(t)
+            if (live is None) != (k is None):
+                mism += 1
+                if mism <= 3:
+                    check(False, f"فیبوناچی t={t}: زنده={live} موتور={'-' if k is None else f.sl[k]}")
+                continue
+            if live is not None:
+                total += 1
+                if not (live["side"] == ("LONG" if f.side[k] == 1 else "SHORT") and close_enough(live["sl"], f.sl[k])
+                        and close_enough(live["tp"], f.tp[k]) and abs(live["score"] - f.score[k]) < 1e-9):
+                    mism += 1
+    check(mism == 0 and total >= 30, f"فیبوناچی: {mism} عدم تطابق از {total} سیگنال")
+    # اجرای کامل سبد با فیبوناچی (+ بستن در ‎-0.5R) — بدون خطا و با معامله
+    arrs = {f"F{i}/USDT": synth(4000, seed=90 + i, price=10 + i * 5) for i in range(3)}
+    cfg = make_cfg(WC_MIN_SCORE_PCT=0, ACTIVE_STRATEGIES=["fib_phase"], HTF_TIMEFRAMES=["1h", "4h"],
+                   USE_HTF_CONFIRMATION=False, CUT_LOSS_R=0.5, USE_TRAILING_SL=False)
+    preps = _build_preps(arrs, cfg, int(arrs["F0/USDT"][400, 0]))
+    res, _ = fast_backtest.run_single(preps, list(arrs), cfg)
+    m = sim_engine.metrics(res["trades"], res["equity"], cfg.VIRTUAL_BALANCE_START)
+    check(len(res["trades"]) > 5 and "avg_week_usd" in m, f"سبد فیبوناچی: {len(res['trades'])} معامله")
+    print(f"  ✓ {total} سیگنال روی همه‌ی کندل‌ها یکسان؛ سبد: {len(res['trades'])} معامله، "
+          f"میانگین هفتگی {m['avg_week_usd']}$، {m['pos_weeks_pct']}٪ هفته‌ها مثبت")
+
+
 if __name__ == "__main__":
     t_start = time.time()
     test_strategy_equivalence()
@@ -651,6 +694,7 @@ if __name__ == "__main__":
     test_daily_loss_limit()
     test_cut_loss_whatif()
     test_xs_momentum()
+    test_fib_dense()
     print()
     if FAILS:
         print(f"❌ {len(FAILS)} خطا")
