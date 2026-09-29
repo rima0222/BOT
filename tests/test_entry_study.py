@@ -1,0 +1,232 @@
+# -*- coding: utf-8 -*-
+"""
+تست‌های «سنجش کیفیت ورود» (بدون اینترنت):
+  1) نتیجه‌ی مسیر (براکت‌ها، MFE/MAE، بازده آینده) == حلقه‌ی ساده‌ی کندل‌به‌کندل
+  2) پر شدن سفارش پولبک + «کندل پر شدن فقط حد ضرر»
+  3) عدم نگاه به آینده: ویژگی‌ها و سیگنال‌ها با کوتاه کردن دیتا عوض نمی‌شن
+  4) بازار کاملاً تصادفی: پایه ≈ ۵۰٪ و تقریباً هیچ سیگنالی «مزیت پایدار» نمی‌گیره
+  5) بازار با روندهای ماندگار (مزیت کاشته‌شده): سیگنال‌های روندی مزیت پایدار می‌گیرن
+  6) خطای استاندارد خوشه‌ای == فرمول مرجع
+اجرا:  python3 tests/test_entry_study.py
+"""
+import os
+import sys
+import time
+
+import numpy as np
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+sys.path.insert(0, HERE)
+
+import entry_study as es  # noqa: E402
+import fast_backtest  # noqa: E402
+from test_engine import synth, make_cfg  # noqa: E402
+
+FAILS = []
+
+
+def check(cond, msg):
+    if not cond:
+        FAILS.append(msg)
+        print("  ✗", msg)
+
+
+def random_walk(n, seed, start_ms=1_600_000_000_000, tf_ms=900_000, price=50.0, vol=0.004):
+    rng = np.random.default_rng(seed)
+    close = price * np.exp(np.cumsum(rng.normal(0, vol, n)))
+    open_ = np.r_[price, close[:-1]]
+    wick = np.abs(rng.normal(0, vol * 0.6, (n, 2))) * close[:, None]
+    high = np.maximum(open_, close) + wick[:, 0]
+    low = np.minimum(open_, close) - wick[:, 1]
+    volume = rng.lognormal(10, 0.4, n)
+    ts = start_ms + np.arange(n, dtype=np.int64) * tf_ms
+    return np.column_stack([ts, open_, high, low, close, volume]).astype(np.float64)
+
+
+def brute(h, l, c, p0, e, sd, r, H, tp, sl, stop_only):
+    up_best = 0.0
+    dn_best = 0.0
+    res = None
+    for k in range(H):
+        j = p0 + k
+        up = ((h[j] - e) if sd > 0 else (e - l[j])) / r
+        dn = ((e - l[j]) if sd > 0 else (h[j] - e)) / r
+        if k == 0 and stop_only:
+            up = -np.inf
+        dn_best = max(dn_best, dn)
+        up_best = max(up_best, up)
+        if res is None:
+            if dn >= sl - 1e-12:
+                res = (-1, -sl)
+            elif up >= tp - 1e-12:
+                res = (1, tp)
+    if res is None:
+        res = (0, (c[p0 + H - 1] - e) * (1 if sd > 0 else -1) / r)
+    return res, up_best, dn_best
+
+
+def test_path_brute():
+    print("۱) نتیجه‌ی مسیر == حلقه‌ی ساده")
+    a = synth(3000, seed=11)
+    h, l, c = a[:, 2], a[:, 3], a[:, 4]
+    rng = np.random.default_rng(3)
+    m = 400
+    H = 40
+    p0 = rng.integers(1, 3000 - H - 1, m)
+    side = np.where(rng.random(m) < 0.5, 1, -1).astype(np.int8)
+    entry = c[p0 - 1] * (1 + rng.normal(0, 0.001, m))
+    rdist = c[p0 - 1] * rng.uniform(0.002, 0.02, m)
+    stop_only = rng.random(m) < 0.3
+    out, res, mfe, mae = es.path_outcomes(h, l, c, p0, entry, side, rdist, H, es.BRACKETS, stop_only)
+    bad = 0
+    for i in range(m):
+        for k, (tp, sl) in enumerate(es.BRACKETS):
+            (o, rv), ub, db = brute(h, l, c, int(p0[i]), entry[i], side[i], rdist[i], H, tp, sl, stop_only[i])
+            if o != out[i, k] or abs(rv - res[i, k]) > 1e-9:
+                bad += 1
+        if abs(max(ub, 0) - mfe[i]) > 1e-9 or abs(max(db, 0) - mae[i]) > 1e-9:
+            bad += 1
+    fwd = es.forward_returns(c, p0, entry, side, rdist, [1, 5, H])
+    ref = np.column_stack([(c[p0 + k - 1] - entry) * side / rdist for k in (1, 5, H)])
+    check(bad == 0 and np.allclose(fwd, ref), f"مسیر: {bad} عدم تطابق")
+    print(f"  ✓ {m} ورود × {len(es.BRACKETS)} براکت (با کندل پر شدن فقط-حد‌ضرر) یکسان")
+
+
+def test_retest_fill_and_lookahead():
+    print("۲+۳) پر شدن پولبک + عدم نگاه به آینده")
+    cfg = make_cfg(HTF_TIMEFRAMES=["1h", "4h"], BRK_MAIN_TREND="off", BRK_BOX_MAX_ATR=6.0, BRK_BOX_MIN_TOUCHES=1,
+                   ENTRY_STUDY_HORIZON={"15m": 48})
+    a = synth(6000, seed=21)
+    start_ms = int(a[400, 0])
+    htf = {"1h": fast_backtest._resample(a, "15m", "1h"), "4h": fast_backtest._resample(a, "15m", "4h")}
+    prep = fast_backtest.prepare_symbol("X/USDT", a, htf, None, start_ms, cfg, keep_volume=True)
+    # پر شدن پولبک: مقایسه با حلقه‌ی ساده (همون قانون موتور: قیمت باید «از» لیمیت رد بشه)
+    v = fast_backtest.variant_from_cfg(cfg)
+    f = prep.finals("box_breakout@retest", v)
+    s = prep.series
+    got_any, got_j = es.retest_fill(s.h, s.l, f.idx.astype(np.int64), f.side, f.entry, cfg.BRK_RETEST_WAIT_BARS)
+    bad = 0
+    for q, (i, sd, en) in enumerate(zip(f.idx.tolist(), f.side.tolist(), f.entry.tolist())):
+        j = None
+        for k in range(1, cfg.BRK_RETEST_WAIT_BARS + 1):
+            if i + k >= s.n:
+                break
+            if (s.l[i + k] < en) if sd > 0 else (s.h[i + k] > en):
+                j = i + k
+                break
+        if (j is not None) != bool(got_any[q]) or (j is not None and j != int(got_j[q])):
+            bad += 1
+    st = es.Study(cfg, "15m", int(a[4000, 0]), ["X/USDT"])
+    st.add_symbol(prep, v, None, None)
+    raw_n = sum(st.counts.get(("box_breakout@retest", sd), {}).get("signals", 0) for sd in (1, -1))
+    got = sum(st.counts.get(("box_breakout@retest", sd), {}).get("filled", 0) for sd in (1, -1))
+    check(bad == 0 and len(f.idx) > 20 and 0 < got <= raw_n, f"پولبک: {bad} عدم تطابق، {got}/{raw_n} پر شده")
+    print(f"  ✓ پر شدن پولبک == حلقه‌ی ساده ({len(f.idx)} سیگنال، {int(got_any.sum())} پر شده)")
+
+    # عدم نگاه به آینده: ویژگی‌ها و سیگنال‌های ساده روی دیتای کوتاه‌شده == دیتای کامل (تا نقطه‌ی برش)
+    F = es.compute_features(prep, cfg)
+    R = es.raw_signals(prep, F)
+    bad = 0
+    for cut in (4500, 5200):
+        a2 = a[:cut]
+        htf2 = {"1h": fast_backtest._resample(a2, "15m", "1h"), "4h": fast_backtest._resample(a2, "15m", "4h")}
+        p2 = fast_backtest.prepare_symbol("X/USDT", a2, htf2, None, start_ms, cfg, keep_volume=True)
+        F2 = es.compute_features(p2, cfg)
+        R2 = es.raw_signals(p2, F2)
+        for k in ("trend", "rsi", "vol_ratio", "bb_ratio", "mom20", "ma_dist", "body", "htf_l", "htf_s", "atr"):
+            x, y = F[k][:cut], F2[k]
+            same = np.isclose(x, y, rtol=1e-9, atol=1e-12, equal_nan=True)
+            bad += int((~same).sum())
+        for name in R2:
+            for sd in (0, 1):
+                bad += int((R[name][sd][:cut] != R2[name][sd]).sum())
+    check(bad == 0, f"نگاه به آینده: {bad} اختلاف")
+    print(f"  ✓ ویژگی‌ها و {len(R)} سیگنال ساده با کوتاه کردن دیتا عوض نمی‌شن")
+
+
+def _study(arrs, cfg, tf="15m"):
+    syms = list(arrs)
+    start_ms = int(arrs[syms[0]][400, 0])
+    end_ms = int(arrs[syms[0]][-1, 0])
+    split = int(start_ms + (end_ms - start_ms) * 0.7)
+    st = es.Study(cfg, tf, split, syms)
+    v = fast_backtest.variant_from_cfg(cfg)
+    btc_prep = None
+    for sym in syms:
+        a = arrs[sym]
+        htf = {"1h": fast_backtest._resample(a, "15m", "1h"), "4h": fast_backtest._resample(a, "15m", "4h")}
+        p = fast_backtest.prepare_symbol(sym, a, htf, None, start_ms, cfg, keep_volume=True)
+        if btc_prep is None:
+            btc_prep = es.btc_context(p)
+            st.add_symbol(p, v, None, None, is_btc=True, base_samples=3000)
+        else:
+            st.add_symbol(p, v, btc_prep, None, base_samples=3000)
+    st.finish()
+    return st, es.analyze(st), es.analyze_features(st)
+
+
+def test_random_walk_no_edge():
+    print("۴) بازار کاملاً تصادفی: هیچ مزیت پایدار الکی")
+    cfg = make_cfg(HTF_TIMEFRAMES=["1h", "4h"], ENTRY_STUDY_HORIZON={"15m": 48})
+    arrs = {f"R{i}/USDT": random_walk(9000, seed=900 + i, price=20 + 3 * i) for i in range(12)}
+    st, rows, frows = _study(arrs, cfg)
+    base = [r for r in rows if r["signal"] == "base" and r["side"] != "both"]
+    p_base = [r["all"]["p"][0] for r in base]
+    robust = [r for r in rows if r.get("verdict") == "robust"]
+    edge_both = [r for r in rows if r.get("verdict") not in ("base", "few") and
+                 r["is"].get("z_p", [0])[0] >= 2 and r["oos"].get("z_p", [0])[0] >= 1]
+    tested = [r for r in rows if r.get("verdict") not in ("base", "few")]
+    good = [f for f in frows if f["flag"] == "good"]
+    check(all(abs(p - 0.5) < 0.02 for p in p_base), f"پایه‌ی تصادفی باید ≈۵۰٪ باشه: {p_base}")
+    check(len(robust) == 0, f"در بازار تصادفی {len(robust)} مزیت پایدار الکی: "
+                            f"{[(r['signal'], r['side']) for r in robust]}")
+    check(len(edge_both) <= max(2, len(tested) // 20), f"مزیت معنادار الکی زیاد: {len(edge_both)} از {len(tested)}")
+    check(len(good) <= max(3, len(frows) // 100), f"فیلتر مفید الکی زیاد: {len(good)} از {len(frows)}")
+    print(f"  ✓ پایه {[round(p * 100, 1) for p in p_base]}٪؛ {len(tested)} ردیف آزمون‌شده، مزیت پایدار {len(robust)}، "
+          f"معنادار در هر دو بخش (بدون کارمزد) {len(edge_both)}؛ فیلتر «مفید» الکی {len(good)} از {len(frows)}")
+    return len(good), len(frows)
+
+
+def test_planted_edge():
+    print("۵) بازار با روندهای ماندگار: سیگنال‌های روندی باید مزیت نشون بدن")
+    cfg = make_cfg(HTF_TIMEFRAMES=["1h", "4h"], ENTRY_STUDY_HORIZON={"15m": 48})
+    arrs = {f"T{i}/USDT": synth(9000, seed=300 + i, price=20 + 3 * i) for i in range(10)}
+    st, rows, _ = _study(arrs, cfg)
+    by = {(r["signal"], r["side"]): r for r in rows}
+    ok = [k for k in ("donch55", "trend_follow") if by.get((k, "both"), {}).get("verdict") in ("robust",
+                                                                                              "edge_weak_oos",
+                                                                                              "edge_costs")]
+    check(len(ok) == 2, f"مزیت کاشته‌شده پیدا نشد: {[(k, by.get((k, 'both'), {}).get('verdict')) for k in ('donch55', 'trend_follow')]}")
+    r = by[("donch55", "both")]
+    print(f"  ✓ شکست ۵۵ کندل: +1R/−1R آموزش {r['is']['p'][0] * 100:.1f}٪ (پایه {r['is']['base_p'][0] * 100:.1f}٪)، "
+          f"آزمون {r['oos']['p'][0] * 100:.1f}٪ — حکم: {r['verdict_text']}")
+
+
+def test_cluster_se():
+    print("۶) خطای استاندارد خوشه‌ای")
+    rng = np.random.default_rng(5)
+    x = rng.normal(0, 1, 500)
+    g = rng.integers(0, 40, 500)
+    m, se = es.cluster_mean_se(x, g)
+    G = len(np.unique(g))
+    ref = np.sqrt(sum(((x[g == k] - x.mean()).sum()) ** 2 for k in np.unique(g))) / len(x) * np.sqrt(G / (G - 1))
+    check(abs(m - x.mean()) < 1e-12 and abs(se - ref) < 1e-12, "خطای خوشه‌ای اشتباهه")
+    # هر ورود یک خوشه ≈ خطای معمولی
+    m2, se2 = es.cluster_mean_se(x, np.arange(500))
+    check(abs(se2 - x.std(ddof=0) / np.sqrt(500) * np.sqrt(500 / 499)) < 1e-12, "خطای خوشه‌ای تکی اشتباهه")
+    print("  ✓ درسته")
+
+
+if __name__ == "__main__":
+    t0 = time.time()
+    test_path_brute()
+    test_retest_fill_and_lookahead()
+    test_cluster_se()
+    test_random_walk_no_edge()
+    test_planted_edge()
+    print()
+    if FAILS:
+        print(f"❌ {len(FAILS)} خطا")
+        sys.exit(1)
+    print(f"✅ همه‌ی تست‌های سنجش ورود موفق ({time.time() - t0:.1f} ثانیه)")
