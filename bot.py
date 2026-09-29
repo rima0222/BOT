@@ -1534,7 +1534,8 @@ def _entry_path(job_id):
 def api_entry_start():
     body = request.get_json(force=True, silent=True) or {}
     days = max(60, min(int(body.get("days", 730)), 1095))
-    top_n = max(3, min(int(body.get("top_n", 30)), 60))
+    top_n = max(3, min(int(body.get("top_n", 30)), 100))
+    signals = body.get("signals") if body.get("signals") in ("core", "patterns", "all") else "core"
     tfs = [t for t in (body.get("timeframes") or ["15m", "1h", "4h", "1d"]) if t in config.TIMEFRAME_PROFILES]
     if not tfs:
         return jsonify({"ok": False, "error": "حداقل یک تایم‌فریم انتخاب کن"}), 400
@@ -1544,11 +1545,11 @@ def api_entry_start():
                             "job_id": compare_proc["job_id"]}), 409
         if backtest_running_job["id"] is not None:
             return jsonify({"ok": False, "error": "یک بک‌تست تکی در حال اجراست؛ صبر کن تمام بشه."}), 409
-        symbols = active_symbols["list"][:top_n] if active_symbols["list"] else list(config.SYMBOLS)[:top_n]
+        symbols = _entry_symbols(top_n)
         job_id = uuid.uuid4().hex[:10]
         cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "compare.py"),
                "--entry-study", "--days", str(days), "--job-id", job_id, "--timeframes", ",".join(tfs),
-               "--progress-file", _progress_path(job_id), "--symbols", ",".join(symbols)]
+               "--progress-file", _progress_path(job_id), "--symbols", ",".join(symbols), "--signals", signals]
         _spawn_compare(cmd, job_id, kind="entry")
     log.info(f"[سنجش کیفیت ورود] شروع شد: {job_id} ({days} روز، {len(symbols)} نماد، {tfs})")
     return jsonify({"ok": True, "job_id": job_id})
@@ -1642,6 +1643,20 @@ def _auto_resume_entry():
         log.warning(f"[سنجش کیفیت ورود] ادامه‌ی خودکار ناموفق: {e}")
 
 
+def _entry_symbols(top_n):
+    """نمادهای پرحجم برای سنجش (تا ۱۰۰): اگه لیست ربات کوتاه‌تره، از صرافی گرفته می‌شه."""
+    syms = list(active_symbols["list"] or config.SYMBOLS)
+    if len(syms) < top_n:
+        try:
+            more, _ = data_fetcher.get_top_symbols(config.EXCHANGE_TRY_ORDER, quote=config.QUOTE_CURRENCY,
+                                                   top_n=top_n + 10, exclude_keywords=config.EXCLUDE_KEYWORDS,
+                                                   cfg=config)
+            syms += [x for x in more if x not in syms]
+        except Exception as e:
+            log.warning(f"[سنجش کیفیت ورود] لیست نمادهای بیشتر گرفته نشد: {e}")
+    return syms[:top_n]
+
+
 def _load_entry(job_id):
     path = _entry_path(_safe_job_id(job_id))
     if not os.path.exists(path):
@@ -1684,6 +1699,7 @@ def api_entry_list():
                 rep_ = json.load(f)
             m = rep_.get("meta", {})
             items.append({"job_id": mm.group(1), "created_at": m.get("created_at"), "days": m.get("days"),
+                          "signal_set": m.get("signal_set", "core"),
                           "symbols": len(m.get("symbols", [])), "timeframes": list((m.get("timeframes") or {}).keys()),
                           "status": (rep_.get("recommendation") or {}).get("status")})
         except Exception:

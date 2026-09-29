@@ -8,6 +8,7 @@
   5) بازار با روندهای ماندگار (مزیت کاشته‌شده): سیگنال‌های روندی مزیت پایدار می‌گیرن
   6) خطای استاندارد خوشه‌ای == فرمول مرجع
   7) ذخیره‌ی مرحله‌ای روی دیسک + خوندن دوباره == اجرای یک‌جا (پایه‌ی «ادامه از جای قطع‌شده»)
+  8) الگوهای کندلی/کلاسیک: شکل‌های ساخته‌شده‌ی دستی درست شناخته می‌شن + بدون نگاه به آینده
 اجرا:  python3 tests/test_entry_study.py
 """
 import os
@@ -146,12 +147,12 @@ def test_retest_fill_and_lookahead():
     print(f"  ✓ ویژگی‌ها و {len(R)} سیگنال ساده با کوتاه کردن دیتا عوض نمی‌شن")
 
 
-def _study(arrs, cfg, tf="15m"):
+def _study(arrs, cfg, tf="15m", signal_set="core"):
     syms = list(arrs)
     start_ms = int(arrs[syms[0]][400, 0])
     end_ms = int(arrs[syms[0]][-1, 0])
     split = int(start_ms + (end_ms - start_ms) * 0.7)
-    st = es.Study(cfg, tf, split, syms)
+    st = es.Study(cfg, tf, split, syms, signal_set=signal_set)
     v = fast_backtest.variant_from_cfg(cfg)
     btc_prep = None
     for sym in syms:
@@ -171,7 +172,10 @@ def test_random_walk_no_edge():
     print("۴) بازار کاملاً تصادفی: هیچ مزیت پایدار الکی")
     cfg = make_cfg(HTF_TIMEFRAMES=["1h", "4h"], ENTRY_STUDY_HORIZON={"15m": 48})
     arrs = {f"R{i}/USDT": random_walk(9000, seed=900 + i, price=20 + 3 * i) for i in range(12)}
-    st, rows, frows = _study(arrs, cfg)
+    st, rows, frows = _study(arrs, cfg, signal_set="all")
+    npat = len({r["signal"] for r in rows if r["signal"].startswith(("cdl_", "pat_", "tal_"))})
+    import patterns as _p
+    check(npat >= (30 if _p.TALIB_NAMES else 18), f"الگوها در سنجش نیومدن ({npat})")   # الگوهای گپ‌دار در سری بدون گپ پیش نمیان
     base = [r for r in rows if r["signal"] == "base" and r["side"] != "both"]
     p_base = [r["all"]["p"][0] for r in base]
     robust = [r for r in rows if r.get("verdict") == "robust"]
@@ -254,6 +258,61 @@ def test_checkpoint_roundtrip():
     print(f"  ✓ {n} ورود؛ جدول سیگنال‌ها، فیلترها و شمارش‌ها یکسان")
 
 
+def _bars(rows, t0=1_600_000_000_000, tf_ms=900_000):
+    a = np.array(rows, dtype=np.float64)
+    ts = t0 + np.arange(len(a)) * tf_ms
+    return np.column_stack([ts, a, np.full(len(a), 1000.0)])
+
+
+def test_patterns():
+    print("۸) الگوهای کندلی و کلاسیک")
+    import patterns
+    # ۲۰ کندل آروم (ATR ≈ ۱) + ریزش ۶ کندلی + الگو
+    flat = [(100, 100.5, 99.5, 100)] * 20
+    fall = [(100 - k, 100.3 - k, 98.8 - k, 99 - k) for k in range(6)]     # کندل‌های قرمز رو به پایین
+    cases = {
+        "cdl_hammer": ([(94, 94.2, 91.0, 94.1)], 1),                    # سایه‌ی پایین بلند
+        "cdl_engulfing": ([(94.5, 94.6, 93.4, 93.6), (93.5, 95.2, 93.3, 95.0)], 1),
+        "cdl_star": ([(95, 95.1, 92.9, 93.0), (92.9, 93.1, 92.5, 92.8), (92.9, 94.8, 92.8, 94.6)], 1),
+    }
+    bad = 0
+    for name, (tail, side) in cases.items():
+        arr = _bars(flat + fall + tail)
+        o, h, l, c = arr[:, 1], arr[:, 2], arr[:, 3], arr[:, 4]
+        atr = np.full(len(c), 1.0)
+        ml, ms, _, _ = patterns.candle_patterns(o, h, l, c, atr)[name]
+        if not ml[-1] or ms[-1]:
+            bad += 1
+            print("   الگو شناخته نشد:", name)
+    check(bad == 0, f"الگوی کندلی: {bad} شکل درست شناخته نشد")
+    # کف دوقلو: دو کف هم‌سطح، سقف میانی، شکست بالای سقف میانی
+    seq = []
+    for p in list(np.linspace(110, 100, 8)) + list(np.linspace(100, 106, 8)) + list(np.linspace(106, 100.2, 8)) \
+            + list(np.linspace(100.2, 105.5, 8)) + [106.8]:
+        seq.append((p, p + 0.4, p - 0.4, p))
+    arr = _bars(seq)
+    atr = np.full(len(arr), 1.0)
+    d = patterns.chart_patterns(arr[:, 1], arr[:, 2], arr[:, 3], arr[:, 4], atr, order=3)["pat_double"]
+    check(len(d["L"][0]) == 1 and d["L"][0][0] == len(arr) - 1, f"کف دوقلو شناخته نشد: {d['L'][0]}")
+    # بدون نگاه به آینده روی سری تصادفی
+    a = synth(8000, seed=12)
+    import analysis
+    import pandas as pd
+    atr = analysis.compute_atr(pd.DataFrame({"high": a[:, 2], "low": a[:, 3], "close": a[:, 4]}), 14).values
+    full = patterns.all_patterns(a[:, 1], a[:, 2], a[:, 3], a[:, 4], atr)
+    mism = 0
+    for cut in (5000, 6666):
+        part = patterns.all_patterns(a[:cut, 1], a[:cut, 2], a[:cut, 3], a[:cut, 4], atr[:cut])
+        for k in full:
+            for (sd, i1, s1), (_, i2, s2) in zip(full[k], part[k]):
+                m = i1 < cut
+                if not (np.array_equal(i1[m], i2) and np.allclose(s1[m], s2)):
+                    mism += 1
+    n_all = sum(len(x[1]) for v in full.values() for x in v)
+    check(mism == 0 and n_all > 1000, f"الگوها: نگاه به آینده {mism}، تعداد {n_all}")
+    print(f"  ✓ شکل‌های دستی درست؛ {len(full)} جفت‌الگو، {n_all} مورد روی سری تصادفی، بدون نگاه به آینده")
+
+
 if __name__ == "__main__":
     t0 = time.time()
     test_path_brute()
@@ -262,6 +321,7 @@ if __name__ == "__main__":
     test_random_walk_no_edge()
     test_planted_edge()
     test_checkpoint_roundtrip()
+    test_patterns()
     print()
     if FAILS:
         print(f"❌ {len(FAILS)} خطا")

@@ -14,6 +14,8 @@ source venv/bin/activate
 echo "=== نصب وابستگی‌ها ==="
 pip install --upgrade pip
 pip install -r requirements.txt
+# TA-Lib (تعریف‌های استاندارد الگوهای کندلی برای «سنجش الگوها») — اختیاری؛ اگه نصب نشد ربات بدونش کار می‌کنه
+pip install "TA-Lib>=0.6" || echo "⚠️ TA-Lib نصب نشد؛ سنجش الگوها فقط با الگوهای خود ربات انجام می‌شه"
 
 echo "=== تنظیم سرویس systemd ==="
 CURRENT_USER=$(whoami)

@@ -36,6 +36,7 @@ import numpy as np
 import analysis
 import fast_backtest
 import indicators as ind
+import patterns as pat
 import sim_engine
 import signals_engine as se
 
@@ -297,7 +298,7 @@ def forward_returns(c, p0, entry, side, rdist, horizons):
 class Study:
     """تنظیمات ثابت یک تایم‌فریم + ثبت همه‌ی ورودها."""
 
-    def __init__(self, cfg, tf, split_ms, symbols, xs=False):
+    def __init__(self, cfg, tf, split_ms, symbols, xs=False, signal_set="core"):
         self.cfg = cfg
         self.tf = tf
         self.split_ms = int(split_ms)
@@ -315,12 +316,17 @@ class Study:
         lo, hi = sim_engine.htf_required_pct(getattr(cfg, "HTF_MIN_AGREEMENT", 4),
                                              getattr(cfg, "SHORT_EXTRA_HTF_AGREEMENT", 0))
         self.htf_req = (lo, hi)
+        # signal_set: "core" = استراتژی‌ها + فرضیه‌های ساده، "patterns" = الگوهای کندلی و کلاسیک، "all" = همه
+        self.signal_set = signal_set
         names = ["base"]
-        for sname in STRATEGY_SIGNALS:
-            names += [sname, sname + "|htf"]
-        if xs:
-            names += ["xs_momentum"]
-        names += RAW_SIGNALS
+        if signal_set in ("core", "all"):
+            for sname in STRATEGY_SIGNALS:
+                names += [sname, sname + "|htf"]
+            if xs:
+                names += ["xs_momentum"]
+            names += RAW_SIGNALS
+        if signal_set in ("patterns", "all"):
+            names += list(pat.ALL_PATTERNS)
         self.names = names
         self.code = {nm: i for i, nm in enumerate(names)}
         self.symbols = list(symbols)
@@ -357,7 +363,7 @@ class Study:
         groups = []   # (name, side, idx, entry, sl(None), retest)
 
         for sname in STRATEGY_SIGNALS:
-            if sname not in prep.structural:
+            if sname not in prep.structural or sname not in self.code:
                 continue
             # فیبوناچی: همه‌ی امتیازها (حداقل امتیاز صفر)؛ اثر امتیاز در تحلیل فیلترها («امتیاز کیفیت») دیده می‌شه
             f = prep.finals(sname, dict(variant, min_score=0.0) if sname == "fib_phase" else variant)
@@ -379,10 +385,16 @@ class Study:
                 if m.any():
                     groups.append(("xs_momentum", sd, xs_final.idx[m].astype(np.int64), xs_final.entry[m],
                                    xs_final.sl[m], False, None))
-        for name, (Lm, Sm) in raw_signals(prep, F, is_btc).items():
-            for sd, mask in ((se.LONG, Lm), (se.SHORT, Sm)):
-                idx = np.flatnonzero(mask & bar_ok)
-                groups.append((name, sd, idx, s.c[idx], None, False, None))
+        if RAW_SIGNALS[0] in self.code:
+            for name, (Lm, Sm) in raw_signals(prep, F, is_btc).items():
+                for sd, mask in ((se.LONG, Lm), (se.SHORT, Sm)):
+                    idx = np.flatnonzero(mask & bar_ok)
+                    groups.append((name, sd, idx, s.c[idx], None, False, None))
+        if pat.ALL_PATTERNS[0] in self.code:
+            # الگوهای کندلی و کلاسیک؛ حد ضرر کتابی هر الگو برای ستون «با حد ضرر خود الگو (RR2)»
+            for name, lst in pat.all_patterns(s.o, s.h, s.l, s.c, atr, int(cfg.SWING_ORDER)).items():
+                for sd, idx, slv in lst:
+                    groups.append((name, sd, idx, s.c[idx], slv, False, None))
         # پایه: نمونه‌ی منظم از همه‌ی کندل‌ها
         cand = np.flatnonzero(bar_ok & (ar + H + 1 <= n - 1))
         if len(cand):
@@ -791,6 +803,8 @@ def analyze(study, cb=None):
 
 
 def label_of(name):
+    if name in pat.LABELS:
+        return pat.label(name)
     if name.endswith("|htf"):
         return SIG_FA.get(name[:-4], name[:-4]) + " + تایید HTF"
     return SIG_FA.get(name, name)

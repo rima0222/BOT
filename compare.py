@@ -65,6 +65,8 @@ def main():
     ap.add_argument("--progress-file", type=str, default="")
     ap.add_argument("--baseline-file", type=str, default="")
     ap.add_argument("--offline", action="store_true", help="فقط از دیتای کش‌شده (بدون اینترنت)")
+    ap.add_argument("--signals", choices=["core", "patterns", "all"], default="core",
+                    help="سنجش ورود: core = استراتژی‌ها و فرضیه‌ها، patterns = الگوهای کندلی و کلاسیک، all = همه")
     ap.add_argument("--resume", action="store_true",
                     help="ادامه‌ی یک سنجش ورود نیمه‌کاره با همون --job-id (از جایی که قطع شده)")
     ap.add_argument("--entry-study", action="store_true",
@@ -256,11 +258,12 @@ def run_entry_study(args, tfs, all_symbols, base_cfg, cache, prog, job_id, t0):
     ppath = os.path.join(work, "params.json")
     params = _read_json(ppath) if args.resume else None
     if not params:
-        params = {"days": args.days, "timeframes": tfs, "symbols": all_symbols,
+        params = {"days": args.days, "timeframes": tfs, "symbols": all_symbols, "signals": args.signals,
                   "created_at": datetime.utcnow().isoformat(), "now_ms": {}, "runs": 0}
     params["runs"] = int(params.get("runs", 0)) + 1
     _write_json(ppath, params)
     tfs, all_symbols = params["timeframes"], params["symbols"]
+    signal_set = params.get("signals", "core")
     days_req = int(params["days"])
     prog.state["params"].update({"timeframes": tfs, "symbols": all_symbols, "days": days_req})
     if params["runs"] > 1:
@@ -302,9 +305,10 @@ def run_entry_study(args, tfs, all_symbols, base_cfg, cache, prog, job_id, t0):
         plan0 = fast_backtest.plan_jobs(symbols[:1], days, cfg, now_ms)
         start_ms, end_ms = plan0["start_ms"], plan0["now_ms"]
         split_ms = int(start_ms + (end_ms - start_ms) * float(cfg.ENTRY_STUDY_IS_FRACTION))
-        study = es.Study(cfg, tf, split_ms, symbols, xs=(tf == "1d"))
+        study = es.Study(cfg, tf, split_ms, symbols, xs=(tf == "1d"), signal_set=signal_set)
         variant = fast_backtest.variant_from_cfg(cfg)
-        needed = list(es.STRATEGY_SIGNALS)
+        # فقط الگوها: استراتژی‌ها لازم نیستن (سریع‌تر)
+        needed = list(es.STRATEGY_SIGNALS) if signal_set != "patterns" else ["none"]
         base_n = int(cfg.ENTRY_STUDY_BASE_SAMPLES)
 
         def sym_file(sym):
@@ -320,7 +324,7 @@ def run_entry_study(args, tfs, all_symbols, base_cfg, cache, prog, job_id, t0):
             bp, _ = fast_backtest.prepare_all(bplan, bdata, [btc], cfg, strategies_needed=["trend_follow"])
             btc_ctx = es.btc_context(bp[btc]) if btc in bp else None
             del bp, bdata
-            if tf == "1d":
+            if tf == "1d" and signal_set != "patterns":
                 # مومنتوم هفتگی به همه‌ی نمادها با هم نیاز داره (روزانه سبکه)
                 plan, data = fast_backtest.load_market_data(
                     cache, symbols, days, cfg, lambda m, f: prog.update(f"{label} — {m}", f, lo, lo + span * 0.3),
@@ -395,6 +399,7 @@ def run_entry_study(args, tfs, all_symbols, base_cfg, cache, prog, job_id, t0):
         "job_id": job_id, "days": days_req, "created_at": datetime.utcnow().isoformat(), "symbols": all_symbols,
         "total_elapsed_sec": round(time.time() - t0, 1), "bot_version": getattr(config, "BOT_VERSION", ""),
         "events_rows": rows_written, "runs": params["runs"], "started_at": params["created_at"],
+        "signal_set": signal_set,
         "fees": {"maker": base_cfg.MAKER_FEE_PCT, "taker": base_cfg.TAKER_FEE_PCT,
                  "slippage": base_cfg.TAKER_SLIPPAGE_PCT}})
     # فایل همه‌ی ورودها: یک سرتیتر + ورودهای هر تایم‌فریم (چند بخش gzip پشت‌سرهم = یک فایل gzip معتبر)

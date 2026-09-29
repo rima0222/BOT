@@ -430,6 +430,7 @@
       </div>
       <div class="controls-row" style="background:rgba(88,166,255,.08); padding:10px; border-radius:8px;">
         <button id="entAllBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">🔬 سنجش همه‌ی ورودها با یک کلیک</button>
+        <button id="entPatBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">🕯 سنجش همه‌ی الگوهای کندلی و کلاسیک با یک کلیک</button>
         <span class="hint">استراتژی‌های ربات + ۱۱ فرضیه‌ی شناخته‌شده (شکست، پولبک، برگشت، حجم، BTC...) + ۱۵ فیلتر — روی ۱۵ دقیقه، ۱ ساعته، ۴ ساعته و روزانه، ۲ سال، ۳۰ نماد.
           آخرش فایل کامل رو دانلود کن و بفرست تا با هم بررسی کنیم.</span>
       </div>
@@ -437,7 +438,9 @@
         <label>بازه:</label>
         <select id="entDays"><option value="365">۱ سال</option><option value="730" selected>۲ سال</option><option value="1095">۳ سال</option></select>
         <label>تعداد نماد:</label>
-        <select id="entTopN"><option value="10">۱۰</option><option value="20">۲۰</option><option value="30" selected>۳۰</option><option value="40">۴۰</option></select>
+        <select id="entTopN"><option value="10">۱۰</option><option value="20">۲۰</option><option value="30" selected>۳۰</option><option value="40">۴۰</option><option value="50">۵۰ (رم بیشتر)</option><option value="100">۱۰۰ (کند، دیتای زیاد)</option></select>
+        <label>چی سنجیده بشه:</label>
+        <select id="entSignals"><option value="core" selected>استراتژی‌ها + فرضیه‌ها</option><option value="patterns">الگوهای کندلی و کلاسیک</option><option value="all">همه (سنگین)</option></select>
         <label>تایم‌فریم‌ها:</label>
         <span id="entTfChecks" class="opt-grid" style="display:inline-flex;"></span>
         <button id="entStartBtn" class="btn btn-save">▶ شروع سنجش</button>
@@ -460,6 +463,8 @@
           <label>تایم‌فریم:</label><select id="entTf"></select>
           <label>جهت:</label>
           <select id="entSide"><option value="both">خرید و فروش با هم</option><option value="long">فقط خرید</option><option value="short">فقط فروش</option><option value="all">همه</option></select>
+          <label>گروه:</label>
+          <select id="entGroup"><option value="all">همه</option><option value="strat">استراتژی‌ها و فرضیه‌ها</option><option value="cdl">🕯 الگوهای کندلی (همه)</option><option value="tal">🕯 فقط تعریف استاندارد TA-Lib</option><option value="pat">📐 الگوهای کلاسیک</option></select>
           <label class="switch-label"><input type="checkbox" id="entOnlyGood"> فقط بهتر از شانس</label>
         </div>
         <div id="entBase" class="hint" style="margin:6px 0 10px;"></div>
@@ -1731,13 +1736,22 @@ function zc(v){ return (v===null||v===undefined) ? '—' : `<span class="${v>=2?
 document.getElementById('entAllBtn').addEventListener('click', () => {
   document.getElementById('entDays').value = '730';
   document.getElementById('entTopN').value = '30';
+  document.getElementById('entSignals').value = 'core';
   document.querySelectorAll('#entTfChecks input').forEach(x => x.checked = ['15m','1h','4h','1d'].includes(x.dataset.tf));
+  document.getElementById('entStartBtn').click();
+});
+document.getElementById('entPatBtn').addEventListener('click', () => {
+  document.getElementById('entDays').value = '730';
+  document.getElementById('entTopN').value = '40';
+  document.getElementById('entSignals').value = 'patterns';
+  document.querySelectorAll('#entTfChecks input').forEach(x => x.checked = ['1h','4h','1d'].includes(x.dataset.tf));
   document.getElementById('entStartBtn').click();
 });
 document.getElementById('entStartBtn').addEventListener('click', async () => {
   const msg = document.getElementById('entMsg');
   const res = await fetch('/api/entry/start', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
     days: parseInt(document.getElementById('entDays').value), top_n: parseInt(document.getElementById('entTopN').value),
+    signals: document.getElementById('entSignals').value,
     timeframes: [...document.querySelectorAll('#entTfChecks input:checked')].map(x => x.dataset.tf)})});
   const data = await res.json();
   if(!data.ok){ msg.innerText = 'خطا: ' + (data.error||''); msg.style.color = 'var(--red)'; return; }
@@ -1745,10 +1759,10 @@ document.getElementById('entStartBtn').addEventListener('click', async () => {
 });
 function pollEntry(jobId){
   document.getElementById('entProgressRow').style.display = 'flex';
-  document.getElementById('entStartBtn').disabled = true; document.getElementById('entAllBtn').disabled = true;
+  document.getElementById('entStartBtn').disabled = true; document.getElementById('entAllBtn').disabled = true; document.getElementById('entPatBtn').disabled = true;
   if(entPollTimer) clearInterval(entPollTimer);
   const stop = () => { clearInterval(entPollTimer); entPollTimer = null; document.getElementById('entProgressRow').style.display = 'none';
-    document.getElementById('entStartBtn').disabled = false; document.getElementById('entAllBtn').disabled = false; };
+    document.getElementById('entStartBtn').disabled = false; document.getElementById('entAllBtn').disabled = false; document.getElementById('entPatBtn').disabled = false; };
   const tick = async () => {
     try{
       const st = await (await fetch(`/api/compare/status/${jobId}`)).json();
@@ -1771,7 +1785,8 @@ async function loadEntryList(selectId){
     sel.innerHTML = '<option value="">— انتخاب گزارش —</option>' + data.reports.map(r => {
       const d = r.created_at ? new Date(r.created_at+'Z').toLocaleString('fa-IR') : '';
       const st = r.status === 'robust' ? '✓' : (r.status === 'near' ? '◐' : '✗');
-      return `<option value="${r.job_id}">${st} ${d} — ${(r.timeframes||[]).join('/')}، ${r.days} روز، ${r.symbols} نماد</option>`;
+      const ss = {core:'استراتژی‌ها', patterns:'الگوها', all:'همه'}[r.signal_set || 'core'];
+      return `<option value="${r.job_id}">${st} ${d} — ${ss} — ${(r.timeframes||[]).join('/')}، ${r.days} روز، ${r.symbols} نماد</option>`;
     }).join('');
     if(selectId) sel.value = selectId;
     if(data.running_job && !entPollTimer) pollEntry(data.running_job);
@@ -1802,7 +1817,7 @@ async function loadEntryReport(jobId){
   tfSel.innerHTML = Object.entries(entReport.meta.timeframes).map(([k,m]) => `<option value="${k}">${m.label}</option>`).join('');
   renderEntry();
 }
-['entTf','entSide','entOnlyGood'].forEach(id => document.getElementById(id).addEventListener('change', renderEntry));
+['entTf','entSide','entOnlyGood','entGroup'].forEach(id => document.getElementById(id).addEventListener('change', renderEntry));
 function renderEntry(){
   const r = entReport; if(!r) return;
   document.getElementById('entResults').style.display = 'block';
@@ -1820,13 +1835,19 @@ function renderEntry(){
     base.map(b => `<b>شانسی ${ENT_SIDE[b.side]}</b>: +1R/−1R ${pc(b.all.p[0])}، +2R/−1R ${pc(b.all.p[1])}، ارزش خالص RR2 ${rCell(b.all.ev[1])} (کارمزد ${b.all.cost_r}R)`).join(' | ');
   let rows = r.signals.filter(x => x.tf===tf && x.signal!=='base' && (side==='all' || x.side===side));
   if(only) rows = rows.filter(x => ['robust','edge_weak_oos','edge_costs','weak'].includes(x.verdict));
+  const grp = document.getElementById('entGroup').value;
+  const isCdl = x => x.signal.startsWith('cdl_') || x.signal.startsWith('tal_');
+  if(grp === 'cdl') rows = rows.filter(isCdl);
+  else if(grp === 'tal') rows = rows.filter(x => x.signal.startsWith('tal_'));
+  else if(grp === 'pat') rows = rows.filter(x => x.signal.startsWith('pat_'));
+  else if(grp === 'strat') rows = rows.filter(x => !isCdl(x) && !x.signal.startsWith('pat_'));
   const RANK = {robust:0, edge_weak_oos:1, edge_costs:2, weak:3, none:4, reverse:5, few:6};
   const bestEv = x => { const b = x.best_b ?? 1; return (x.oos.ev||[])[b] ?? -9; };
   rows.sort((a,b) => (RANK[a.verdict]-RANK[b.verdict]) || (bestEv(b)-bestEv(a)));
   document.getElementById('entTable').innerHTML = `<thead><tr><th>سیگنال ورود</th><th>جهت</th><th>ورود (آموزش/آزمون)</th>
     <th>+1R قبل از −1R<br>آموزش (شانسی)</th><th>آزمون (شانسی)</th><th>+2R قبل از −1R<br>آزمون (شانسی)</th>
     <th>بهترین براکت</th><th>ارزش خالص<br>آموزش</th><th>آزمون</th><th>z آموزش / آزمون</th><th>دلار/معامله<br>(آزمون، ریسک ۵$)</th>
-    <th>نمادهای بهتر از شانس</th><th>با SL خود استراتژی (RR2)</th><th>حکم</th><th></th></tr></thead><tbody>` +
+    <th>نمادهای بهتر از شانس</th><th>با حد ضرر خود استراتژی/الگو (RR2)</th><th>حکم</th><th></th></tr></thead><tbody>` +
     rows.map(x => { const i = x.is, o = x.oos, b = x.best_b ?? 1;
       const own = (o.own_n ? `${pc(o.own_p2)} / ${rCell(o.own_ev2)}` : '—');
       const fill = x.fill_pct != null ? `<br><span class="hint">پر شدن ${x.fill_pct}٪</span>` : '';
