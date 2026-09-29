@@ -1158,9 +1158,62 @@ def _reports_dir():
     return d
 
 
+def _pid_alive(pid):
+    """پروسه‌ی compare.py با این شماره هنوز زنده‌ست؟ (زامبی = مرده)"""
+    try:
+        pid = int(pid)
+        if pid <= 0:
+            return False
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            if b"compare.py" not in f.read():
+                return False
+        with open(f"/proc/{pid}/stat", "r") as f:
+            return f.read().rsplit(")", 1)[-1].split()[0] != "Z"
+    except Exception:
+        return False
+
+
+def _read_progress(job_id):
+    try:
+        with open(_progress_path(job_id), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _external_job():
+    """کار سنگینی که هنوز زنده‌ست ولی این پروسه‌ی ربات شروعش نکرده (مثلاً قبل از ری‌استارت ربات)."""
+    d = _reports_dir()
+    now = time.time()
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return None
+    for name in names:
+        if not (name.startswith("progress_") and name.endswith(".json")):
+            continue
+        path = os.path.join(d, name)
+        try:
+            if now - os.path.getmtime(path) > 3 * 86400:
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                st = json.load(f)
+        except Exception:
+            continue
+        if st.get("state") == "running" and _pid_alive(st.get("pid")):
+            return st.get("job_id"), st.get("kind", "compare")
+    return None
+
+
 def compare_running():
     p = compare_proc["proc"]
-    return p is not None and p.poll() is None
+    if p is not None and p.poll() is None:
+        return True
+    ext = _external_job()
+    if ext:
+        compare_proc["job_id"], compare_proc["kind"] = ext
+        return True
+    return False
 
 
 def _progress_path(job_id):
@@ -1217,7 +1270,7 @@ def _spawn_compare(cmd, job_id, kind="compare"):
     """اجرای compare.py در پروسه‌ی جدا با اولویت پایین (باید داخل compare_lock صدا زده بشه)."""
     if os.environ.get("TRADINGBOT_OFFLINE") == "1":
         cmd.append("--offline")   # فقط برای تست بدون اینترنت
-    log_file = open(os.path.join(_reports_dir(), f"{kind}_{job_id}.log"), "w")
+    log_file = open(os.path.join(_reports_dir(), f"{kind}_{job_id}.log"), "a")
 
     def lower_priority():
         try:
@@ -1337,9 +1390,23 @@ def api_compare_status(job_id):
             st = json.load(f)
     except Exception:
         return jsonify({"ok": True, "state": "running", "progress": 0, "message": "در حال شروع"})
-    if st.get("state") == "running" and compare_proc["job_id"] == job_id and not compare_running():
-        st["state"] = "error"
-        st["message"] = "پروسه‌ی مقایسه به‌طور غیرمنتظره متوقف شد (احتمالاً کمبود رم). تعداد نمادها رو کمتر کن."
+    if st.get("state") == "running":
+        p = compare_proc["proc"]
+        alive = (compare_proc["job_id"] == job_id and p is not None and p.poll() is None) or _pid_alive(st.get("pid"))
+        if not alive:
+            if st.get("kind") == "entry" and os.path.isdir(_entry_work(job_id)):
+                st["state"] = "stopped"
+                st["resumable"] = True
+                st["message"] = ("سنجش وسط کار متوقف شد (ری‌استارت ربات، کمبود رم یا ری‌استارت سرور). "
+                                 "قسمت‌های انجام‌شده ذخیره شدن — «▶ ادامه» رو بزن تا از همون‌جا ادامه بده.")
+            else:
+                st["state"] = "error"
+                st["message"] = ("کار وسط راه متوقف شد (ری‌استارت ربات/سرور یا کمبود رم). دوباره شروع کن؛ "
+                                 "اگه باز تکرار شد، تعداد نمادها رو کمتر کن.")
+    try:
+        st["stale_sec"] = int((datetime.utcnow() - datetime.fromisoformat(st.get("updated_at") or st.get("started_at"))).total_seconds())
+    except Exception:
+        pass
     return jsonify({"ok": True, **{k: v for k, v in st.items() if k != "error"}, "error": st.get("error")})
 
 
@@ -1473,6 +1540,94 @@ def api_entry_start():
     return jsonify({"ok": True, "job_id": job_id})
 
 
+def _entry_work(job_id):
+    return os.path.join(_reports_dir(), f"entry_work_{_safe_job_id(job_id)}")
+
+
+def _entry_params(job_id):
+    try:
+        with open(os.path.join(_entry_work(job_id), "params.json"), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _spawn_entry_resume(job_id, params):
+    """ادامه‌ی سنجش نیمه‌کاره (باید داخل compare_lock صدا زده بشه)."""
+    cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "compare.py"),
+           "--entry-study", "--resume", "--days", str(params["days"]), "--job-id", job_id,
+           "--timeframes", ",".join(params["timeframes"]), "--progress-file", _progress_path(job_id),
+           "--symbols", ",".join(params["symbols"])]
+    _spawn_compare(cmd, job_id, kind="entry")
+
+
+@app.route("/api/entry/resume", methods=["POST"])
+def api_entry_resume():
+    body = request.get_json(force=True, silent=True) or {}
+    job_id = _safe_job_id(body.get("job_id", ""))
+    params = _entry_params(job_id)
+    if not params:
+        return jsonify({"ok": False, "error": "کار نیمه‌کاره‌ای با این شناسه پیدا نشد"}), 404
+    with compare_lock:
+        if compare_running():
+            return jsonify({"ok": False, "error": "یک کار دیگه در حال اجراست.", "job_id": compare_proc["job_id"]}), 409
+        if backtest_running_job["id"] is not None:
+            return jsonify({"ok": False, "error": "یک بک‌تست تکی در حال اجراست؛ صبر کن تمام بشه."}), 409
+        _spawn_entry_resume(job_id, params)
+    log.info(f"[سنجش کیفیت ورود] ادامه از جای قطع‌شده: {job_id}")
+    return jsonify({"ok": True, "job_id": job_id})
+
+
+def _unfinished_entries():
+    import re
+    out = []
+    d = _reports_dir()
+    for name in os.listdir(d):
+        mm = re.match(r"^entry_work_([A-Za-z0-9]+)$", name)
+        if not mm or os.path.exists(_entry_path(mm.group(1))):
+            continue
+        job_id = mm.group(1)
+        params = _entry_params(job_id)
+        if not params:
+            continue
+        done = [tf for tf in params.get("timeframes", [])
+                if os.path.exists(os.path.join(_entry_work(job_id), tf, "done.json"))]
+        st = _read_progress(job_id) or {}
+        out.append({"job_id": job_id, "created_at": params.get("created_at"), "days": params.get("days"),
+                    "symbols": len(params.get("symbols", [])), "timeframes": params.get("timeframes", []),
+                    "done_timeframes": done, "state": st.get("state"), "progress": st.get("progress", 0),
+                    "running": st.get("state") == "running" and _pid_alive(st.get("pid")),
+                    "auto_resumes": params.get("auto_resumes", 0)})
+    out.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    return out
+
+
+def _auto_resume_entry():
+    """
+    بعد از روشن شدن ربات: اگه سنجشی وسط کار کشته شده بود (مثلاً با ری‌استارت ربات/سرور)، خودکار از همون‌جا
+    ادامه پیدا می‌کنه — حداکثر ۳ بار برای هر سنجش (اگه مدام به‌خاطر کمبود رم قطع بشه، تکرار بی‌پایان نشه).
+    """
+    time.sleep(90)
+    try:
+        for u in _unfinished_entries():
+            if u["running"] or u["state"] != "running" or int(u.get("auto_resumes", 0)) >= 3:
+                continue
+            with compare_lock:
+                if compare_running() or backtest_running_job["id"] is not None:
+                    return
+                params = _entry_params(u["job_id"])
+                params["auto_resumes"] = int(params.get("auto_resumes", 0)) + 1
+                pth = os.path.join(_entry_work(u["job_id"]), "params.json")
+                with open(pth + ".tmp", "w", encoding="utf-8") as f:
+                    json.dump(params, f, ensure_ascii=False)
+                os.replace(pth + ".tmp", pth)
+                _spawn_entry_resume(u["job_id"], params)
+            log.info(f"[سنجش کیفیت ورود] ادامه‌ی خودکار بعد از ری‌استارت: {u['job_id']} (بار {params['auto_resumes']})")
+            return
+    except Exception as e:
+        log.warning(f"[سنجش کیفیت ورود] ادامه‌ی خودکار ناموفق: {e}")
+
+
 def _load_entry(job_id):
     path = _entry_path(_safe_job_id(job_id))
     if not os.path.exists(path):
@@ -1521,7 +1676,7 @@ def api_entry_list():
             continue
     items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
     running = compare_proc["job_id"] if compare_running() and compare_proc.get("kind") == "entry" else None
-    return jsonify({"ok": True, "reports": items[:30], "running_job": running})
+    return jsonify({"ok": True, "reports": items[:30], "running_job": running, "unfinished": _unfinished_entries()})
 
 
 ENTRY_README = """راهنمای فایل‌های «سنجش کیفیت ورود»
@@ -1625,5 +1780,6 @@ def api_data_cache():
 
 if __name__ == "__main__":
     scheduler.start()
+    threading.Thread(target=_auto_resume_entry, daemon=True).start()
     log.info("ربات معامله‌گر مجازی استارت شد.")
     app.run(host=config.HOST, port=config.PORT, debug=False, use_reloader=False)

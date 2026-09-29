@@ -445,9 +445,10 @@
       </div>
       <div class="controls-row" id="entProgressRow" style="display:none; flex-direction:column; align-items:flex-start;">
         <div class="pbar"><div class="pbar-fill" id="entPbar"></div></div>
-        <span class="hint">⏳ <b id="entProgressText">در حال اجرا...</b></span>
-        <span class="hint">می‌تونی صفحه رو ببندی — نتیجه ذخیره می‌شه.</span>
+        <span class="hint">⏳ <b id="entProgressText">در حال اجرا...</b> <span id="entStale"></span></span>
+        <span class="hint">می‌تونی صفحه رو ببندی. کار مرحله‌به‌مرحله ذخیره می‌شه؛ اگه وسطش قطع بشه (ری‌استارت ربات یا سرور، کمبود رم)، از همون‌جا ادامه پیدا می‌کنه.</span>
       </div>
+      <div id="entUnfinished"></div>
       <div class="controls-row">
         <label>گزارش‌های قبلی:</label>
         <select id="entReports" style="width:380px;"><option value="">—</option></select>
@@ -1738,8 +1739,11 @@ function pollEntry(jobId){
       if(!st.ok) return;
       document.getElementById('entPbar').style.width = Math.round((st.progress||0)*100) + '%';
       document.getElementById('entProgressText').innerText = `${Math.round((st.progress||0)*100)}٪ — ${st.message || st.state}`;
+      const stale = document.getElementById('entStale');
+      stale.innerText = (st.state === 'running' && st.stale_sec > 90) ? `(آخرین پیشرفت ${Math.round(st.stale_sec/60)} دقیقه پیش — مرحله‌ی سنگینه، صبر کن)` : '';
       if(st.state === 'done'){ stop(); await loadEntryList(jobId); loadEntryReport(jobId); }
-      else if(st.state === 'error'){ stop(); const m = document.getElementById('entMsg'); m.innerText = st.message || 'خطا'; m.style.color = 'var(--red)'; }
+      else if(st.state === 'stopped'){ stop(); loadEntryList(); }
+      else if(st.state === 'error'){ stop(); const m = document.getElementById('entMsg'); m.innerText = st.message || 'خطا'; m.style.color = 'var(--red)'; loadEntryList(); }
     }catch(e){ console.error(e); }
   };
   tick(); entPollTimer = setInterval(tick, 3000);
@@ -1755,7 +1759,21 @@ async function loadEntryList(selectId){
     }).join('');
     if(selectId) sel.value = selectId;
     if(data.running_job && !entPollTimer) pollEntry(data.running_job);
+    const un = (data.unfinished || []).filter(u => !u.running);
+    document.getElementById('entUnfinished').innerHTML = un.map(u => {
+      const d = u.created_at ? new Date(u.created_at+'Z').toLocaleString('fa-IR') : '';
+      const done = (u.done_timeframes||[]).length, all = (u.timeframes||[]).length;
+      return `<div class="rec-card none" style="padding:10px; margin:8px 0;">⏸ <b>سنجش نیمه‌کاره</b> (${d} — ${(u.timeframes||[]).join('/')}، ${u.symbols} نماد):
+        ${done} از ${all} تایم‌فریم تمام شده، ${Math.round((u.progress||0)*100)}٪ کل کار. قسمت‌های انجام‌شده ذخیره‌ان.
+        <button class="btn btn-start" style="margin-inline-start:8px;" onclick="resumeEntry('${u.job_id}')">▶ ادامه از همون‌جا</button></div>`;
+    }).join('');
   }catch(e){ console.error(e); }
+}
+async function resumeEntry(jobId){
+  const msg = document.getElementById('entMsg');
+  const data = await (await fetch('/api/entry/resume', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({job_id: jobId})})).json();
+  if(!data.ok){ msg.innerText = 'خطا: ' + (data.error||''); msg.style.color = 'var(--red)'; return; }
+  msg.innerText = ''; document.getElementById('entUnfinished').innerHTML = ''; pollEntry(jobId);
 }
 document.getElementById('entReports').addEventListener('change', e => { if(e.target.value) loadEntryReport(e.target.value); });
 async function loadEntryReport(jobId){

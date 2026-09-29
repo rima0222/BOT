@@ -102,8 +102,8 @@ def plan_jobs(symbols, days, cfg, now_ms=None):
             "fetched": fetched, "btc_job": btc_job, "main_since_ms": start_ms - warm_main}
 
 
-def load_market_data(cache, symbols, days, cfg, progress_cb=None, offline=False):
-    plan = plan_jobs(symbols, days, cfg)
+def load_market_data(cache, symbols, days, cfg, progress_cb=None, offline=False, now_ms=None):
+    plan = plan_jobs(symbols, days, cfg, now_ms)
 
     def cb(done, total, sym, tf, res):
         if progress_cb:

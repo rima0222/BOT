@@ -38,6 +38,7 @@ class Progress:
     def write(self):
         if not self.path:
             return
+        self.state["updated_at"] = datetime.utcnow().isoformat()   # ضربان: پنل می‌فهمه هنوز زنده‌ست
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(self.state, f, ensure_ascii=False)
@@ -64,6 +65,8 @@ def main():
     ap.add_argument("--progress-file", type=str, default="")
     ap.add_argument("--baseline-file", type=str, default="")
     ap.add_argument("--offline", action="store_true", help="فقط از دیتای کش‌شده (بدون اینترنت)")
+    ap.add_argument("--resume", action="store_true",
+                    help="ادامه‌ی یک سنجش ورود نیمه‌کاره با همون --job-id (از جایی که قطع شده)")
     ap.add_argument("--entry-study", action="store_true",
                     help="سنجش کیفیت ورود: هر سیگنال در برابر ورود شانسی (بدون تریلینگ/مدیریت)")
     ap.add_argument("--data-only", action="store_true",
@@ -75,6 +78,9 @@ def main():
     tfs = [t.strip() for t in args.timeframes.split(",") if t.strip() in config.TIMEFRAME_PROFILES] or ["15m"]
     params = {"days": args.days, "top": args.top, "grid": args.grid, "timeframes": tfs}
     prog = Progress(args.progress_file, job_id, params)
+    if args.entry_study:
+        prog.state["kind"] = "entry"
+        prog.write()
     t0 = time.time()
     try:
         base_cfg = backtest.build_config(config)
@@ -214,97 +220,204 @@ def run_data_only(args, tfs, all_symbols, base_cfg, cache, prog, job_id, t0):
                 print(f"   ✗ {r['symbol']}: پوشش {q.get('coverage_pct', 0)}٪ {r.get('error', '')}")
 
 
+def _read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _write_json(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def entry_work_dir(job_id):
+    return os.path.join(config.REPORTS_DIR, f"entry_work_{job_id}")
+
+
 def run_entry_study(args, tfs, all_symbols, base_cfg, cache, prog, job_id, t0):
-    """سنجش کیفیت ورود برای همه‌ی تایم‌فریم‌ها → reports/entry_<id>.json + CSVها + خلاصه."""
-    import csv
+    """
+    سنجش کیفیت ورود برای همه‌ی تایم‌فریم‌ها → reports/entry_<id>.json + CSVها + خلاصه.
+
+    ذخیره‌ی مرحله‌ای (قابل ادامه): ورودهای هر نماد بعد از محاسبه در reports/entry_work_<id>/<tf>/ ذخیره
+    می‌شن و نتیجه‌ی هر تایم‌فریم تمام‌شده هم جدا. اگه کار وسط راه قطع بشه (ری‌استارت ربات، کمبود رم،
+    خاموشی سرور)، با --resume همون شناسه از همون‌جا ادامه پیدا می‌کنه — و نتیجه دقیقاً مثل اجرای
+    بدون وقفه‌ست (زمان پایان دیتای هر تایم‌فریم هم ذخیره می‌شه).
+    """
+    import shutil
     import entry_study as es
     rd = config.REPORTS_DIR
-    events_path = os.path.join(rd, f"entry_events_{job_id}.csv.gz")
+    work = entry_work_dir(job_id)
+    os.makedirs(work, exist_ok=True)
+    ppath = os.path.join(work, "params.json")
+    params = _read_json(ppath) if args.resume else None
+    if not params:
+        params = {"days": args.days, "timeframes": tfs, "symbols": all_symbols,
+                  "created_at": datetime.utcnow().isoformat(), "now_ms": {}, "runs": 0}
+    params["runs"] = int(params.get("runs", 0)) + 1
+    _write_json(ppath, params)
+    tfs, all_symbols = params["timeframes"], params["symbols"]
+    days_req = int(params["days"])
+    prog.state["params"].update({"timeframes": tfs, "symbols": all_symbols, "days": days_req})
+    if params["runs"] > 1:
+        prog.update(f"ادامه‌ی سنجش (بار {params['runs']})", 0.0)
+
     all_rows, feat_rows, tf_meta = [], [], {}
     n_tf = len(tfs)
     btc = getattr(base_cfg, "BTC_REGIME_SYMBOL", "BTC/USDT")
     rows_written = 0
     per_tf_cap = max(20000, int(base_cfg.ENTRY_STUDY_MAX_CSV_ROWS) // max(1, n_tf))
+
+    def safe(sym):
+        return sym.replace("/", "_").replace(":", "_")
+
     for i, tf in enumerate(tfs):
+        lo, span = i / n_tf, 1.0 / n_tf
+        label = tournament.TF_LABELS.get(tf, tf)
+        tdir = os.path.join(work, tf)
+        os.makedirs(tdir, exist_ok=True)
+        done_path = os.path.join(tdir, "done.json")
+        done = _read_json(done_path)
+        if done:
+            all_rows += done["rows"]
+            feat_rows += done["frows"]
+            tf_meta[tf] = done["meta"]
+            rows_written += int(done.get("events_rows", 0))
+            prog.update(f"{label} — قبلاً تمام شده بود (از ذخیره)", 1.0, lo, lo + span)
+            continue
         prof = config.TIMEFRAME_PROFILES[tf]
         cfg = fast_backtest.profile_cfg(base_cfg, tf)
         cfg._NEED_HTF = True
-        days = min(args.days, int(prof["MAX_DAYS"]))
+        days = min(days_req, int(prof["MAX_DAYS"]))
         symbols = all_symbols[:min(len(all_symbols), int(prof["SCAN_SYMBOLS"]))]
-        load_syms = symbols + ([btc] if btc not in symbols else [])
-        lo, span = i / n_tf, 1.0 / n_tf
-        label = tournament.TF_LABELS.get(tf, tf)
-        plan, data = fast_backtest.load_market_data(
-            cache, load_syms, days, cfg, lambda m, f: prog.update(f"{label} — {m}", f, lo, lo + span * 0.4),
-            offline=args.offline)
-        split_ms = int(plan["start_ms"] + (plan["now_ms"] - plan["start_ms"]) * float(cfg.ENTRY_STUDY_IS_FRACTION))
+        now_ms = params["now_ms"].get(tf)
+        if not now_ms:
+            now_ms = int(time.time() * 1000)
+            params["now_ms"][tf] = now_ms
+            _write_json(ppath, params)
+        plan0 = fast_backtest.plan_jobs(symbols[:1], days, cfg, now_ms)
+        start_ms, end_ms = plan0["start_ms"], plan0["now_ms"]
+        split_ms = int(start_ms + (end_ms - start_ms) * float(cfg.ENTRY_STUDY_IS_FRACTION))
         study = es.Study(cfg, tf, split_ms, symbols, xs=(tf == "1d"))
         variant = fast_backtest.variant_from_cfg(cfg)
         needed = list(es.STRATEGY_SIGNALS)
-        btc_ctx = None
-        bp, _ = fast_backtest.prepare_all(plan, data, [btc], cfg, strategies_needed=["trend_follow"])
-        if btc in bp:
-            btc_ctx = es.btc_context(bp[btc])
-        del bp
-        meta = {}
-        n_ev = 0
-        if tf == "1d":
-            preps, meta = fast_backtest.prepare_all(plan, data, symbols, cfg, strategies_needed=needed,
-                                                    keep_volume=True)
-            xs = fast_backtest.xs_finals(preps, variant)
-            for j, sym in enumerate(symbols):
-                if sym in preps:
-                    n_ev += study.add_symbol(preps[sym], variant, btc_ctx, xs.get(sym), is_btc=(sym == btc),
-                                             base_samples=int(cfg.ENTRY_STUDY_BASE_SAMPLES))
-                prog.update(f"{label} — ورودهای {sym} ({j + 1}/{len(symbols)})", (j + 1) / len(symbols),
-                            lo + span * 0.4, lo + span * 0.85)
-            del preps, xs
-        else:
-            for j, sym in enumerate(symbols):
-                p1, m1 = fast_backtest.prepare_all(plan, data, [sym], cfg, strategies_needed=needed, keep_volume=True)
-                meta.update(m1)
-                if sym in p1:
-                    n_ev += study.add_symbol(p1[sym], variant, btc_ctx, None, is_btc=(sym == btc),
-                                             base_samples=int(cfg.ENTRY_STUDY_BASE_SAMPLES))
-                del p1
-                for key in [k for k in data if k[0] == sym and sym != btc]:
-                    data.pop(key, None)   # آزادسازی رم
-                prog.update(f"{label} — ورودهای {sym} ({j + 1}/{len(symbols)})", (j + 1) / len(symbols),
-                            lo + span * 0.4, lo + span * 0.85)
-        del data
-        study.finish()
-        prog.update(f"{label} — تحلیل آماری", 0.0, lo + span * 0.85, lo + span)
-        rows = es.analyze(study)
-        prog.update(f"{label} — تحلیل فیلترها", 0.5, lo + span * 0.85, lo + span)
-        frows = es.analyze_features(study)
-        rows_written += es.write_events(study, events_path, per_tf_cap, symbols, append=rows_written > 0)
-        ok_syms = [s for s, v in meta.items() if v.get("ok")]
-        tf_meta[tf] = {"timeframe": tf, "label": label, "days": days, "symbols": ok_syms,
-                       "bad_symbols": {s: v.get("error") for s, v in meta.items() if not v.get("ok")},
-                       "start_ms": plan["start_ms"], "end_ms": plan["now_ms"], "split_ms": split_ms,
-                       "horizon_bars": study.H, "horizons": study.hz, "r_atr": study.r_atr,
-                       "cooldown_bars": study.gap, "cluster_days": round(study.cluster_ms / 86_400_000, 1),
-                       "events": int(n_ev), "htf_required_pct": list(study.htf_req),
-                       "cost_market_pct": round(study.cost_market * 100, 4),
-                       "cost_limit_pct": round(study.cost_limit * 100, 4)}
-        all_rows += rows
+        base_n = int(cfg.ENTRY_STUDY_BASE_SAMPLES)
+
+        def sym_file(sym):
+            return os.path.join(tdir, f"sym_{safe(sym)}.npz")
+
+        todo = [s_ for s_ in symbols if not os.path.exists(sym_file(s_))]
+        if len(todo) < len(symbols):
+            prog.update(f"{label} — {len(symbols) - len(todo)} نماد از قبل ذخیره شده؛ ادامه از نماد بعدی",
+                        0.0, lo, lo + span * 0.05)
+        if todo:
+            prog.update(f"{label} — دیتای BTC", 0.0, lo, lo + span * 0.05)
+            bplan, bdata = fast_backtest.load_market_data(cache, [btc], days, cfg, None, args.offline, now_ms)
+            bp, _ = fast_backtest.prepare_all(bplan, bdata, [btc], cfg, strategies_needed=["trend_follow"])
+            btc_ctx = es.btc_context(bp[btc]) if btc in bp else None
+            del bp, bdata
+            if tf == "1d":
+                # مومنتوم هفتگی به همه‌ی نمادها با هم نیاز داره (روزانه سبکه)
+                plan, data = fast_backtest.load_market_data(
+                    cache, symbols, days, cfg, lambda m, f: prog.update(f"{label} — {m}", f, lo, lo + span * 0.3),
+                    offline=args.offline, now_ms=now_ms)
+                preps, meta = fast_backtest.prepare_all(plan, data, symbols, cfg, strategies_needed=needed,
+                                                        keep_volume=True)
+                del data
+                xs = fast_backtest.xs_finals(preps, variant)
+                for j, sym in enumerate(todo):
+                    if sym in preps:
+                        study.add_symbol(preps[sym], variant, btc_ctx, xs.get(sym), is_btc=(sym == btc),
+                                         base_samples=base_n, keep_part=False)
+                        es.save_symbol(sym_file(sym), sym, study.last_part, study._cur, meta.get(sym))
+                    else:
+                        es.save_symbol(sym_file(sym), sym, None, {}, meta.get(sym))
+                    prog.update(f"{label} — ورودهای {sym} ({j + 1}/{len(todo)})", (j + 1) / len(todo),
+                                lo + span * 0.3, lo + span * 0.8)
+                del preps, xs
+            else:
+                for j, sym in enumerate(todo):
+                    # دیتای هر نماد جدا خونده می‌شه (رم کم)
+                    plan, data = fast_backtest.load_market_data(cache, [sym], days, cfg, None, args.offline, now_ms)
+                    p1, m1 = fast_backtest.prepare_all(plan, data, [sym], cfg, strategies_needed=needed,
+                                                       keep_volume=True)
+                    del data
+                    if sym in p1:
+                        study.add_symbol(p1[sym], variant, btc_ctx, None, is_btc=(sym == btc),
+                                         base_samples=base_n, keep_part=False)
+                        es.save_symbol(sym_file(sym), sym, study.last_part, study._cur, m1.get(sym))
+                    else:
+                        es.save_symbol(sym_file(sym), sym, None, {}, m1.get(sym))
+                    study.last_part = None
+                    del p1
+                    prog.update(f"{label} — ورودهای {sym} ({symbols.index(sym) + 1}/{len(symbols)})",
+                                (j + 1) / len(todo), lo + span * 0.05, lo + span * 0.8)
+        prog.update(f"{label} — خوندن ورودهای ذخیره‌شده", 0.0, lo + span * 0.8, lo + span)
+        meta, n_ev = study.assemble([sym_file(s_) for s_ in symbols])
+        rows = es.analyze(study, cb=lambda f, nm: prog.update(f"{label} — تحلیل آماری: {es.label_of(nm)}", f,
+                                                            lo + span * 0.8, lo + span * 0.88))
+        frows = es.analyze_features(study, cb=lambda f, nm: prog.update(
+            f"{label} — تحلیل فیلترها: {es.label_of(nm)}", f, lo + span * 0.88, lo + span * 0.97))
+        ev_path = os.path.join(tdir, "events.csv.gz")
+        n_rows = es.write_events(study, ev_path, per_tf_cap, symbols, header=False)
+        ok_syms = [s_ for s_ in symbols if (meta.get(s_) or {}).get("ok")]
+        m_tf = {"timeframe": tf, "label": label, "days": days, "symbols": ok_syms,
+                "bad_symbols": {s_: (meta.get(s_) or {}).get("error", "دیتا نیست") for s_ in symbols
+                                if not (meta.get(s_) or {}).get("ok")},
+                "start_ms": start_ms, "end_ms": end_ms, "split_ms": split_ms,
+                "horizon_bars": study.H, "horizons": study.hz, "r_atr": study.r_atr,
+                "cooldown_bars": study.gap, "cluster_days": round(study.cluster_ms / 86_400_000, 1),
+                "events": int(n_ev), "htf_required_pct": list(study.htf_req),
+                "cost_market_pct": round(study.cost_market * 100, 4),
+                "cost_limit_pct": round(study.cost_limit * 100, 4)}
+        rows_json = [es.row_to_json(r) for r in rows]
+        _write_json(done_path, {"rows": rows_json, "frows": frows, "meta": m_tf, "events_rows": n_rows,
+                                "events_header": es.events_header(study.hz)})
+        for s_ in symbols:   # ورودهای خام دیگه لازم نیست (جای دیسک)
+            try:
+                os.remove(sym_file(s_))
+            except OSError:
+                pass
+        all_rows += rows_json
         feat_rows += frows
+        tf_meta[tf] = m_tf
+        rows_written += n_rows
         del study
 
     if not all_rows:
         raise RuntimeError("هیچ ورودی برای سنجش پیدا نشد: " + json.dumps(tf_meta, ensure_ascii=False)[:500])
     report = es_build_report(all_rows, feat_rows, tf_meta)
     report["meta"].update({
-        "job_id": job_id, "days": args.days, "created_at": datetime.utcnow().isoformat(), "symbols": all_symbols,
+        "job_id": job_id, "days": days_req, "created_at": datetime.utcnow().isoformat(), "symbols": all_symbols,
         "total_elapsed_sec": round(time.time() - t0, 1), "bot_version": getattr(config, "BOT_VERSION", ""),
-        "events_rows": rows_written,
+        "events_rows": rows_written, "runs": params["runs"], "started_at": params["created_at"],
         "fees": {"maker": base_cfg.MAKER_FEE_PCT, "taker": base_cfg.TAKER_FEE_PCT,
                  "slippage": base_cfg.TAKER_SLIPPAGE_PCT}})
+    # فایل همه‌ی ورودها: یک سرتیتر + ورودهای هر تایم‌فریم (چند بخش gzip پشت‌سرهم = یک فایل gzip معتبر)
+    import csv
+    import gzip
+    import io
+    events_path = os.path.join(rd, f"entry_events_{job_id}.csv.gz")
+    first = _read_json(os.path.join(work, tfs[0], "done.json")) or {}
+    buf = io.StringIO()
+    csv.writer(buf).writerow(first.get("events_header") or [])
+    with open(events_path + ".tmp", "wb") as out:
+        out.write(gzip.compress(buf.getvalue().encode("utf-8")))
+        for tf in tfs:
+            pth = os.path.join(work, tf, "events.csv.gz")
+            if os.path.exists(pth):
+                with open(pth, "rb") as f:
+                    shutil.copyfileobj(f, out)
+    os.replace(events_path + ".tmp", events_path)
     with open(os.path.join(rd, f"entry_signals_{job_id}.csv"), "w", encoding="utf-8-sig", newline="") as f:
         csv.writer(f).writerows(es.signal_csv_rows(all_rows, _hz_union(tf_meta)))
     fcols = ["tf", "signal", "label", "feature", "feature_label", "bucket", "lo", "hi", "n_is", "n_oos", "p1_is",
-             "p1_oos", "lift1_is", "lift1_oos", "p2_is", "p2_oos", "ev2_is", "ev2_oos", "d_ev2_is", "d_ev2_oos", "z_is", "z_oos",
-             "tfs_agree", "bucket_idx", "sig_p1_is", "sig_p1_oos", "sig_ev2_is", "sig_ev2_oos", "flag"]
+             "p1_oos", "lift1_is", "lift1_oos", "p2_is", "p2_oos", "ev2_is", "ev2_oos", "d_ev2_is", "d_ev2_oos", "z_is",
+             "z_oos", "tfs_agree", "bucket_idx", "sig_p1_is", "sig_p1_oos", "sig_ev2_is", "sig_ev2_oos", "flag"]
     with open(os.path.join(rd, f"entry_features_{job_id}.csv"), "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fcols)
         w.writeheader()
@@ -314,6 +427,7 @@ def run_entry_study(args, tfs, all_symbols, base_cfg, cache, prog, job_id, t0):
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False)
     print_entry_summary(report, os.path.join(rd, f"entry_summary_{job_id}.txt"))
+    shutil.rmtree(work, ignore_errors=True)
     prog.state.update({"state": "done", "progress": 1.0, "message": "تمام شد", "report": out_path, "kind": "entry"})
     prog.write()
 

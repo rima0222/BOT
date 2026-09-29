@@ -28,6 +28,8 @@
 """
 import csv
 import gzip
+import json
+import os
 
 import numpy as np
 
@@ -323,12 +325,25 @@ class Study:
         self.sym_code = {s: i for i, s in enumerate(self.symbols)}
         self.parts = []
         self.counts = {}   # (name, side) -> {"signals": n, "filled": n}
+        self._cur = {}     # شمارش‌های آخرین نماد (برای ذخیره‌ی مرحله‌ای)
+        self.last_part = None
+        self.E = None
 
     def _count(self, name, side, key, k):
-        d = self.counts.setdefault((name, int(side)), {"signals": 0, "filled": 0, "no_room": 0})
+        # فقط شمارش همین نماد؛ در انتها (یا موقع خوندن از فایل ذخیره) به کل اضافه می‌شه — نه دوبار
+        d = self._cur.setdefault((name, int(side)), {"signals": 0, "filled": 0, "no_room": 0})
         d[key] += int(k)
 
-    def add_symbol(self, prep, variant, btc=None, xs_final=None, is_btc=False, base_samples=3000):
+    def merge_counts(self, counts):
+        for key, d in counts.items():
+            dst = self.counts.setdefault(key, {"signals": 0, "filled": 0, "no_room": 0})
+            for k, v in d.items():
+                dst[k] = dst.get(k, 0) + int(v)
+
+    def add_symbol(self, prep, variant, btc=None, xs_final=None, is_btc=False, base_samples=3000, keep_part=True):
+        """ورودهای یک نماد. keep_part=False: فقط در last_part نگه‌داشته می‌شه (برای ذخیره روی دیسک)."""
+        self._cur = {}
+        self.last_part = None
         cfg = self.cfg
         s = prep.series
         n = s.n
@@ -396,6 +411,8 @@ class Study:
             cols["sl"].append(np.full(len(idx), np.nan) if sl is None else np.asarray(sl, dtype=np.float64))
             cols["retest"].append(np.full(len(idx), bool(retest)))
         if not cols["sig"]:
+            if keep_part:
+                self.merge_counts(self._cur)
             return 0
         E = {k: np.concatenate(v) for k, v in cols.items()}
 
@@ -423,6 +440,8 @@ class Study:
         E = {k: v[keep] for k, v in E.items()}
         p0, stop_only, rdist = p0[keep], stop_only[keep], rdist[keep]
         m = len(p0)
+        if keep_part:
+            self.merge_counts(self._cur)
         if m == 0:
             return 0
         out, res, mfe, mae = path_outcomes(s.h, s.l, s.c, p0, E["entry"], E["side"], rdist, H, BRACKETS, stop_only)
@@ -466,15 +485,57 @@ class Study:
         part = {
             "sig": E["sig"], "side": E["side"], "sym": np.full(m, self.sym_code.get(prep.symbol, -1), dtype=np.int16),
             "t_ms": t_ms.astype(np.int64), "seg": (t_ms >= self.split_ms).astype(np.int8),
-            "clus": (t_ms // self.cluster_ms).astype(np.int64),
+            "clus": (t_ms // self.cluster_ms).astype(np.int32),
             "entry": E["entry"], "rdist_pct": (rdist / E["entry"] * 100.0).astype(np.float32),
             "out": out, "res": res.astype(np.float32), "cost": cost.astype(np.float32),
             "fwd": fwd.astype(np.float32), "mfe": mfe.astype(np.float32), "mae": mae.astype(np.float32),
             "own_out": own_out, "own_res": own_res.astype(np.float32), "own_cost": own_cost.astype(np.float32),
             "feat": {k: np.asarray(v, dtype=np.float32) for k, v in feat.items()},
         }
-        self.parts.append(part)
+        self.last_part = part
+        if keep_part:
+            self.parts.append(part)
         return m
+
+    def assemble(self, paths):
+        """
+        ورودهای ذخیره‌شده‌ی همه‌ی نمادها (به ترتیب نمادها) → جدول نهایی. آرایه‌ها از قبل با اندازه‌ی نهایی
+        ساخته و فایل‌به‌فایل پر می‌شن (رم کمتر از چسباندن همه با هم). خروجی: {نماد: meta}، تعداد ورود
+        """
+        infos = []
+        for pth in paths:
+            with np.load(pth) as z:
+                infos.append(json.loads(bytes(z["__info"]).decode("utf-8")))
+        total = sum(int(i["m"]) for i in infos)
+        metas = {}
+        E = None
+        pos = 0
+        for pth, info in zip(paths, infos):
+            self.merge_counts({(c[0], int(c[1])): c[2] for c in info["counts"]})
+            metas[info["symbol"]] = info.get("meta") or {}
+            m = int(info["m"])
+            if m == 0:
+                continue
+            with np.load(pth) as z:
+                if E is None:
+                    E = {"feat": {}}
+                    for k in z.files:
+                        if k == "__info":
+                            continue
+                        a = z[k]
+                        dst = np.empty((total,) + a.shape[1:], dtype=a.dtype)
+                        if k.startswith("feat__"):
+                            E["feat"][k[6:]] = dst
+                        else:
+                            E[k] = dst
+                for k in z.files:
+                    if k == "__info":
+                        continue
+                    dst = E["feat"][k[6:]] if k.startswith("feat__") else E[k]
+                    dst[pos:pos + m] = z[k]
+            pos += m
+        self.E = E
+        return metas, total
 
     def finish(self):
         """چسباندن ورودهای همه‌ی نمادها."""
@@ -490,6 +551,33 @@ class Study:
         self.parts = []
         self.E = E
         return E
+
+
+def _json_default(o):
+    if hasattr(o, "item"):
+        return o.item()
+    return str(o)
+
+
+def save_symbol(path, symbol, part, counts, meta):
+    """ذخیره‌ی ورودهای یک نماد روی دیسک (برای ادامه‌ی کار بعد از قطع شدن)."""
+    arrays = {}
+    m = 0
+    if part is not None:
+        m = len(part["sig"])
+        for k, v in part.items():
+            if k == "feat":
+                for f, a in v.items():
+                    arrays["feat__" + f] = a
+            else:
+                arrays[k] = v
+    info = {"symbol": symbol, "m": m, "meta": meta or {},
+            "counts": [[k[0], int(k[1]), v] for k, v in (counts or {}).items()]}
+    arrays["__info"] = np.frombuffer(json.dumps(info, ensure_ascii=False, default=_json_default).encode("utf-8"),
+                                     dtype=np.uint8)
+    tmp = path + ".tmp.npz"
+    np.savez_compressed(tmp, **arrays)
+    os.replace(tmp, path)
 
 
 # ==================== تحلیل ====================
@@ -600,42 +688,62 @@ def verdict(row):
 VERDICT_RANK = {"robust": 0, "edge_weak_oos": 1, "edge_costs": 2, "weak": 3, "none": 4, "reverse": 5, "few": 6}
 
 
-def analyze(study):
+def _subset(E, idx):
+    S = {k: v[idx] for k, v in E.items() if k != "feat"}
+    S["feat"] = {f: v[idx] for f, v in E["feat"].items()}
+    return S
+
+
+def _by_signal(E):
+    """اندیس ورودهای هر سیگنال (ترتیب اصلی حفظ می‌شه) — به‌جای ماسک روی کل جدول (خیلی سریع‌تر)."""
+    order = np.argsort(E["sig"], kind="stable")
+    srt = E["sig"][order]
+    out = {}
+    for c in np.unique(srt).tolist():
+        lo = np.searchsorted(srt, c, "left")
+        hi = np.searchsorted(srt, c, "right")
+        out[int(c)] = order[lo:hi]
+    return out
+
+
+def analyze(study, cb=None):
     """جدول سیگنال‌ها (هر سیگنال × جهت × بخش) با مقایسه‌ی پایه."""
     E = study.E
     rows = []
     if E is None:
         return rows
+    groups = _by_signal(E)
     base_code = study.code["base"]
     base = {}
+    B = _subset(E, groups[base_code]) if base_code in groups else None
     for seg in ("is", "oos", "all"):
-        sm = _seg_mask(E, seg)
         for sd in (1, -1):
-            base[(seg, sd)] = group_stats(E, sm & (E["sig"] == base_code) & (E["side"] == sd))
+            base[(seg, sd)] = group_stats(B, _seg_mask(B, seg) & (B["side"] == sd)) if B is not None else {"n": 0}
     # پایه‌ی هر نماد (برای «در چند درصد نمادها بهتر بوده»)
     sym_base = {}
-    bm = E["sig"] == base_code
-    for sym in np.unique(E["sym"][bm]).tolist():
-        for sd in (1, -1):
-            mm = bm & (E["sym"] == sym) & (E["side"] == sd)
-            o = E["out"][mm][:, 0]
-            rs = o != 0
-            sym_base[(sym, sd)] = float((o[rs] == 1).mean()) if rs.any() else np.nan
+    if B is not None:
+        for sym in np.unique(B["sym"]).tolist():
+            for sd in (1, -1):
+                mm = (B["sym"] == sym) & (B["side"] == sd)
+                o = B["out"][mm][:, 0]
+                rs = o != 0
+                sym_base[(sym, sd)] = float((o[rs] == 1).mean()) if rs.any() else np.nan
 
-    for code, name in enumerate(study.names):
-        sig_m = E["sig"] == code
+    todo = [(c, nm) for c, nm in enumerate(study.names) if c in groups]
+    for i, (code, name) in enumerate(todo):
+        S = B if code == base_code else _subset(E, groups[code])
         for sd, sd_name in ((1, "long"), (-1, "short"), (0, "both")):
-            mside = sig_m if sd == 0 else (sig_m & (E["side"] == sd))
+            mside = np.ones(len(S["sig"]), dtype=bool) if sd == 0 else (S["side"] == sd)
             if not mside.any():
                 continue
             row = {"tf": study.tf, "signal": name, "label": label_of(name), "side": sd_name}
             for seg in ("is", "oos", "all"):
-                m = mside & _seg_mask(E, seg)
-                st = group_stats(E, m)
+                m = mside & _seg_mask(S, seg)
+                st = group_stats(S, m)
                 if name != "base" and st["n"]:
                     if sd == 0:
-                        nl = int((m & (E["side"] == 1)).sum())
-                        ns = int((m & (E["side"] == -1)).sum())
+                        nl = int((m & (S["side"] == 1)).sum())
+                        ns = int((m & (S["side"] == -1)).sum())
                         b = _combine_base([base[(seg, 1)], base[(seg, -1)]], [nl, ns]) \
                             if base[(seg, 1)].get("n") and base[(seg, -1)].get("n") else None
                     else:
@@ -645,14 +753,14 @@ def analyze(study):
             if name != "base":
                 # سازگاری بین نمادها (کل دوره، براکت ۱:۱)
                 better = tot = 0
-                for sym in np.unique(E["sym"][mside]).tolist():
-                    mm = mside & (E["sym"] == sym)
-                    o = E["out"][mm][:, 0]
+                for sym in np.unique(S["sym"][mside]).tolist():
+                    mm = mside & (S["sym"] == sym)
+                    o = S["out"][mm][:, 0]
                     rs = o != 0
                     if rs.sum() < 10:
                         continue
                     p = float((o[rs] == 1).mean())
-                    sides = E["side"][mm][rs]
+                    sides = S["side"][mm][rs]
                     ref = [sym_base.get((sym, int(x)), np.nan) for x in (1, -1)]
                     bref = (np.mean(sides == 1) * np.nan_to_num(ref[0]) + np.mean(sides == -1) * np.nan_to_num(ref[1]))
                     tot += 1
@@ -670,6 +778,8 @@ def analyze(study):
             row["fill_pct"] = round(100.0 * fill_n / sig_n, 1) if (name.endswith("@retest") or "@retest|" in name) \
                 and sig_n else None
             rows.append(row)
+        if cb:
+            cb((i + 1) / len(todo), name)
     return rows
 
 
@@ -733,7 +843,7 @@ def _z_bucket(E, m, ref):
     return (mean - ref) / se_b if se_b and np.isfinite(se_b) and se_b > 0 else np.nan
 
 
-def analyze_features(study, min_is=80):
+def analyze_features(study, min_is=80, cb=None):
     """
     کدوم شرط (فیلتر) کیفیت ورود رو بهتر می‌کنه؟ برای هر سیگنال (خرید و فروش با هم، ویژگی‌ها
     هم‌جهت)، ورودها بر اساس هر ویژگی به سطل‌ها تقسیم می‌شن و درصد «+1R قبل از −1R» و ارزش
@@ -744,37 +854,39 @@ def analyze_features(study, min_is=80):
     rows = []
     if E is None:
         return rows
-    is_all = E["seg"] == 0
-    oos_all = E["seg"] == 1
-    for code, name in enumerate(study.names):
-        sm = E["sig"] == code
-        n_is = int((sm & is_all).sum())
-        if n_is < min_is or int((sm & oos_all).sum()) < 20:
+    groups = _by_signal(E)
+    todo = [(c, nm) for c, nm in enumerate(study.names) if c in groups]
+    for i, (code, name) in enumerate(todo):
+        if cb:
+            cb(i / len(todo), name)
+        S = _subset(E, groups[code])
+        is_all = S["seg"] == 0
+        oos_all = S["seg"] == 1
+        n_is = int(is_all.sum())
+        if n_is < min_is or int(oos_all.sum()) < 20:
             continue
-        p_is, ev_is = _hit_ev(E, sm & is_all, MAIN_B)
-        p_oos, ev_oos = _hit_ev(E, sm & oos_all, MAIN_B)
-        p1_is, _ = _hit_ev(E, sm & is_all, 0)
-        p1_oos, _ = _hit_ev(E, sm & oos_all, 0)
+        p_is, ev_is = _hit_ev(S, is_all, MAIN_B)
+        p_oos, ev_oos = _hit_ev(S, oos_all, MAIN_B)
+        p1_is, _ = _hit_ev(S, is_all, 0)
+        p1_oos, _ = _hit_ev(S, oos_all, 0)
         for fname, flabel, kind, spec in FEATURES:
-            vals = E["feat"][fname][sm].astype(np.float64)
-            lab, buckets = _bucketize(vals, kind, spec, is_all[sm])
+            vals = S["feat"][fname].astype(np.float64)
+            lab, buckets = _bucketize(vals, kind, spec, is_all)
             if lab is None or len(buckets) < 2:
                 continue
             for bi, (btxt, lo, hi) in enumerate(buckets):
                 bm = lab == bi
-                full = np.zeros(len(E["sig"]), dtype=bool)
-                full[np.flatnonzero(sm)[bm]] = True
-                mi, mo = full & is_all, full & oos_all
+                mi, mo = bm & is_all, bm & oos_all
                 ni, no = int(mi.sum()), int(mo.sum())
                 if ni < 15:
                     continue
-                bp1_is, bev_is = _hit_ev(E, mi, MAIN_B)
-                bp1o_is, _ = _hit_ev(E, mi, 0)
-                bp_oos, bev_oos = _hit_ev(E, mo, MAIN_B) if no else (np.nan, np.nan)
-                bp1o_oos, _ = _hit_ev(E, mo, 0) if no else (np.nan, np.nan)
+                bp1_is, bev_is = _hit_ev(S, mi, MAIN_B)
+                bp1o_is, _ = _hit_ev(S, mi, 0)
+                bp_oos, bev_oos = _hit_ev(S, mo, MAIN_B) if no else (np.nan, np.nan)
+                bp1o_oos, _ = _hit_ev(S, mo, 0) if no else (np.nan, np.nan)
                 # معناداری بهبود در آموزش (خوشه‌ای): ارزش مورد انتظار سطل منهای کل سیگنال
-                z = _z_bucket(E, mi, ev_is)
-                z_o = _z_bucket(E, mo, ev_oos) if no >= 2 else np.nan
+                z = _z_bucket(S, mi, ev_is)
+                z_o = _z_bucket(S, mo, ev_oos) if no >= 2 else np.nan
                 lift1_is, lift1_oos = bp1o_is - p1_is, bp1o_oos - p1_oos
                 d_is, d_oos = bev_is - ev_is, bev_oos - ev_oos
                 # سخت‌گیرانه (هزاران سطل آزمایش می‌شه؛ با z≥۲ حدود ۱ از ۱۵۰ سطل شانسی «مفید» درمیومد):
@@ -847,7 +959,18 @@ def signal_csv_rows(rows, hz):
     return out
 
 
-def write_events(study, path, max_rows, symbols, append=False):
+def fwd_labels(hz):
+    return [str(k) for k in hz[:-1]] + ["H"]
+
+
+def events_header(hz):
+    return (["tf", "symbol", "signal", "side", "time_utc", "segment", "entry", "r_pct", "cost_r"]
+            + [f"out_{k}" for k in BRACKET_KEYS] + [f"res_{k}" for k in BRACKET_KEYS]
+            + [f"fwd_{k}" for k in fwd_labels(hz)] + ["mfe", "mae", "own_out_2_1", "own_res_2_1", "own_cost"]
+            + [f[0] for f in FEATURES])
+
+
+def write_events(study, path, max_rows, symbols, append=False, header=True):
     """همه‌ی ورودها (با سقف) در یک CSV فشرده — برای بررسی دقیق‌تر و ساختن فیلترهای ترکیبی."""
     E = study.E
     if E is None:
@@ -864,14 +987,11 @@ def write_events(study, path, max_rows, symbols, append=False):
         idx_base = np.sort(rng.choice(idx_base, max(0, cap_base), replace=False))
     sel = np.concatenate([idx_sig, idx_base])
     fnames = [f[0] for f in FEATURES]
-    header = (["tf", "symbol", "signal", "side", "time_utc", "segment", "entry", "r_pct", "cost_r"]
-              + [f"out_{k}" for k in BRACKET_KEYS] + [f"res_{k}" for k in BRACKET_KEYS]
-              + [f"fwd_{k}" for k in study.hz] + ["mfe", "mae", "own_out_2_1", "own_res_2_1", "own_cost"] + fnames)
     mode = "at" if append else "wt"
     with gzip.open(path, mode, encoding="utf-8", newline="") as fh:
         w = csv.writer(fh)
-        if not append:
-            w.writerow(header)
+        if header and not append:
+            w.writerow(events_header(study.hz))
         for i in sel.tolist():
             t = np.datetime64(int(E["t_ms"][i]), "ms").astype("datetime64[m]")
             sym_i = int(E["sym"][i])

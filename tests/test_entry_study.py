@@ -7,6 +7,7 @@
   4) بازار کاملاً تصادفی: پایه ≈ ۵۰٪ و تقریباً هیچ سیگنالی «مزیت پایدار» نمی‌گیره
   5) بازار با روندهای ماندگار (مزیت کاشته‌شده): سیگنال‌های روندی مزیت پایدار می‌گیرن
   6) خطای استاندارد خوشه‌ای == فرمول مرجع
+  7) ذخیره‌ی مرحله‌ای روی دیسک + خوندن دوباره == اجرای یک‌جا (پایه‌ی «ادامه از جای قطع‌شده»)
 اجرا:  python3 tests/test_entry_study.py
 """
 import os
@@ -218,6 +219,41 @@ def test_cluster_se():
     print("  ✓ درسته")
 
 
+def test_checkpoint_roundtrip():
+    print("۷) ذخیره‌ی مرحله‌ای == اجرای یک‌جا")
+    import json
+    import tempfile
+    cfg = make_cfg(HTF_TIMEFRAMES=["1h", "4h"], ENTRY_STUDY_HORIZON={"15m": 48})
+    arrs = {f"C{i}/USDT": synth(5000, seed=40 + i, price=10 + 2 * i) for i in range(5)}
+    syms = list(arrs)
+    start_ms = int(arrs[syms[0]][400, 0])
+    split = int(start_ms + (int(arrs[syms[0]][-1, 0]) - start_ms) * 0.7)
+    v = None
+    a = es.Study(cfg, "15m", split, syms)
+    b = es.Study(cfg, "15m", split, syms)
+    paths = []
+    with tempfile.TemporaryDirectory() as d:
+        for sym in syms:
+            ar = arrs[sym]
+            htf = {"1h": fast_backtest._resample(ar, "15m", "1h"), "4h": fast_backtest._resample(ar, "15m", "4h")}
+            p = fast_backtest.prepare_symbol(sym, ar, htf, None, start_ms, cfg, keep_volume=True)
+            v = v or fast_backtest.variant_from_cfg(cfg)
+            a.add_symbol(p, v)
+            b.add_symbol(p, v, keep_part=False)
+            pth = os.path.join(d, sym.replace("/", "_") + ".npz")
+            es.save_symbol(pth, sym, b.last_part, b._cur, {"ok": True})
+            paths.append(pth)
+        a.finish()
+        metas, n = b.assemble(paths)
+    ja = json.dumps([es.row_to_json(r) for r in es.analyze(a)], sort_keys=True)
+    jb = json.dumps([es.row_to_json(r) for r in es.analyze(b)], sort_keys=True)
+    fa = json.dumps(es.analyze_features(a), sort_keys=True)
+    fb = json.dumps(es.analyze_features(b), sort_keys=True)
+    check(ja == jb and fa == fb and a.counts == b.counts and n == len(a.E["sig"]) and len(metas) == len(syms),
+          "ذخیره‌ی مرحله‌ای با اجرای یک‌جا فرق داره")
+    print(f"  ✓ {n} ورود؛ جدول سیگنال‌ها، فیلترها و شمارش‌ها یکسان")
+
+
 if __name__ == "__main__":
     t0 = time.time()
     test_path_brute()
@@ -225,6 +261,7 @@ if __name__ == "__main__":
     test_cluster_se()
     test_random_walk_no_edge()
     test_planted_edge()
+    test_checkpoint_roundtrip()
     print()
     if FAILS:
         print(f"❌ {len(FAILS)} خطا")
