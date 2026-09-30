@@ -272,6 +272,8 @@
         <span id="wcBox"><span class="hint" id="weightsInfo"></span>
         <label style="margin-right:14px;">حداقل امتیاز ورود:</label>
         <select id="minScoreSelect" style="width:110px;"></select></span>
+        <span id="patBox" style="display:none;"><label style="margin-right:14px;">ساختار بازار:</label>
+          <select id="patStructSelect" style="width:230px;"><option value="with">فقط هم‌جهت ساختار داو (HH/HL، LH/LL)</option><option value="off">بدون فیلتر ساختار</option></select></span>
         <span class="hint" id="brkInfo" style="display:none;"></span>
       </div>
       <div class="controls-row">
@@ -490,6 +492,7 @@
       <div class="controls-row" style="background:rgba(63,185,80,.08); padding:10px; border-radius:8px;">
         <button id="cmpAllBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">🏆 مقایسه‌ی همه‌ی استراتژی‌ها با یک کلیک</button>
         <button id="cmpFibBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">📐 تست فیبوناچی با یک کلیک</button>
+        <button id="cmpPatBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">🕯 تست «الگو + ساختار بازار» با یک کلیک</button>
         <span class="hint">روندگیر، شکست باکس، ترکیبی وزن‌دار و ترکیب‌هاشون — با/بدون تایید HTF، تریلینگ، پولبک، خروج زودهنگام، بستن در ‎-0.6R —
           + روی روزانه: روندگیر و مومنتوم هفتگی — روی ۱۵ دقیقه، ۱ ساعته، ۴ ساعته و روزانه، ۲ سال، ۳۰ نماد. یک گزارش، با بهترین انتخاب و دکمه‌ی اعمال روی ربات.</span>
       </div>
@@ -514,6 +517,7 @@
         <label>دامنه:</label>
         <select id="cmpGrid" style="width:260px;">
           <option value="all" selected>🏆 همه‌ی استراتژی‌ها و ترکیب‌ها — حدود ۷۰ تنظیم برای هر تایم‌فریم</option>
+          <option value="pattern">🕯 الگو + ساختار بازار — با/بدون فیلتر ساختار × (RR2 ثابت / ۳ تریلینگ / بستن در ‎-0.5R / تریلینگ+بستن) — ۱۲ تنظیم</option>
           <option value="fib">📐 فیبوناچی حرکت دوم — حداقل امتیاز × (RR2 ثابت / بستن در ‎-0.5R / تریلینگ / هر دو) × HTF — ۳۲ تنظیم</option>
           <option value="focus">🎯 فقط شکست باکس + گزینه‌هاش — ۲۴۰ تنظیم</option>
           <option value="quick">سریع، هر دو استراتژی — حدود ۷۰۰ تنظیم برای هر تایم‌فریم</option>
@@ -788,7 +792,8 @@ function resultBadge(result, et){
 }
 
 const STRAT_FA = {weighted_confluence: 'ترکیبی وزن‌دار', box_breakout: 'شکست باکس', 'box_breakout@retest': 'شکست باکس (پولبک)',
-                  trend_follow: 'روندگیر', xs_momentum: 'مومنتوم هفتگی', fib_phase: 'فیبوناچی حرکت دوم'};
+                  trend_follow: 'روندگیر', xs_momentum: 'مومنتوم هفتگی', fib_phase: 'فیبوناچی حرکت دوم',
+                  pattern_structure: 'الگو + ساختار بازار', 'pattern_structure@free': 'الگو (بدون فیلتر ساختار)'};
 function stratName(n){ return STRAT_FA[n] || n || '—'; }
 function htfTxt(v){ return (v === null || v === undefined) ? '—' : (v > 5 || window.__htfWeighted ? v + '٪' : v + '/5'); }
 
@@ -865,6 +870,7 @@ document.getElementById('entryModeSelect').addEventListener('change', (e) => pos
 
 document.getElementById('minScoreSelect').addEventListener('change', (e) => postControl({min_score: parseFloat(e.target.value)}));
 document.getElementById('strategySelect').addEventListener('change', (e) => postControl({strategy: e.target.value}));
+document.getElementById('patStructSelect').addEventListener('change', (e) => postControl({pat_structure: e.target.value}));
 document.getElementById('saveDailyBtn').addEventListener('click', () => postControl({
   daily_loss: parseFloat(document.getElementById('dailyLossInput').value) || 0,
   cut_loss_r: parseFloat(document.getElementById('cutLossInput').value) || 0}));
@@ -1014,6 +1020,9 @@ async function refresh(){
     const infos = [];
     if(acts.includes('box_breakout')) infos.push(`شکست باکس ${data.breakout.box_bars} کندلی یا حمایت/مقاومت با کندل بسته، حجم ≥ ${data.breakout.vol_mult}× میانگین`);
     if(acts.includes('xs_momentum')) infos.push(`مومنتوم هفتگی: هر دوشنبه ${data.xs_info.universe} نماد پرحجم بر اساس بازده ${data.xs_info.lookback} روز رتبه‌بندی؛ ${data.xs_info.top_k} تای قوی خرید${data.xs_info.short ? `، ${data.xs_info.top_k} تای ضعیف فروش` : ''}؛ نگه‌داری ${data.xs_info.hold} روز` + (data.timeframe !== '1d' ? ' ⚠️ فقط با تایم‌فریم «روزانه» کار می‌کنه' : ''));
+    document.getElementById('patBox').style.display = acts.includes('pattern_structure') ? '' : 'none';
+    if(document.activeElement.id !== 'patStructSelect') document.getElementById('patStructSelect').value = data.pat_structure || 'with';
+    if(acts.includes('pattern_structure')) infos.push(`الگو + ساختار بازار: ${data.pat_info.count} الگو (کندلی خود ربات، TA-Lib، کلاسیک)؛ ورود روی کندل بسته‌شده‌ی الگو${data.pat_structure === 'off' ? '' : '، فقط هم‌جهت ساختار داو'}؛ حد ضرر کتابی الگو (حداقل ${data.pat_info.min_sl}×ATR)، حد سود RR2، مدیریت با تریلینگ/بستن در ‎-xR پنل`);
     if(acts.includes('fib_phase')) infos.push(`فیبوناچی حرکت دوم: حرکت اول ≥ ${data.fib_info.impulse}×ATR که سقف/کف قبلی رو شکسته، اصلاح به ناحیه‌ی ${data.fib_info.zone} و کندل برگشتی بسته‌شده؛ حد ضرر پشت کف/سقف اصلاح، حد سود RR2؛ امتیاز: ناحیه‌ی طلایی، RSI، حجم اصلاح، پروفایل حجم ${data.fib_info.vp} کندل، سطح شکسته‌شده، روند داو (حداقل امتیاز از همون «حداقل امتیاز ورود»)`);
     if(acts.includes('trend_follow')) infos.push(`روندگیر: شکست سقف/کف ${data.trend_info.bars} کندل هم‌جهت SMA${data.trend_info.ma}، حد ضرر ${data.trend_info.sl_atr}×ATR، بدون حد سود ثابت، ${data.trend_info.trail}`);
     document.getElementById('brkInfo').style.display = infos.length ? '' : 'none';
@@ -1514,6 +1523,13 @@ document.getElementById('cmpAllBtn').addEventListener('click', () => {
   document.getElementById('cmpStartBtn').click();
 });
 
+document.getElementById('cmpPatBtn').addEventListener('click', () => {
+  document.getElementById('cmpDays').value = '730';
+  document.getElementById('cmpTopN').value = '30';
+  document.getElementById('cmpGrid').value = 'pattern';
+  document.querySelectorAll('#cmpTfChecks input').forEach(x => x.checked = ['1h', '4h', '1d'].includes(x.dataset.tf));
+  document.getElementById('cmpStartBtn').click();
+});
 document.getElementById('cmpFibBtn').addEventListener('click', () => {
   document.getElementById('cmpDays').value = '730';
   document.getElementById('cmpTopN').value = '30';

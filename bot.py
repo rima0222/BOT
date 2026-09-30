@@ -44,6 +44,17 @@ conn = paper_trader.get_conn(config.DB_PATH)
 
 
 
+def _apply_live_defaults_v16():
+    """یک‌بار: ربات زنده با «الگو + ساختار بازار» و تنظیمات پیش‌فرضش (config.PAT_LIVE_DEFAULTS)."""
+    if paper_trader.get_setting(conn, "defaults_v16", None) is not None:
+        return
+    for k, v in config.PAT_LIVE_DEFAULTS.items():
+        paper_trader.set_setting(conn, k, v)
+    paper_trader.set_setting(conn, "defaults_v14", "1")
+    paper_trader.set_setting(conn, "defaults_v16", "1")
+    log.info(f"[نسخه‌ی ۱۶] تنظیمات پیش‌فرض «الگو + ساختار بازار» روی ربات زنده اعمال شد: {config.PAT_LIVE_DEFAULTS}")
+
+
 def _apply_live_defaults_v14():
     """یک‌بار: ربات زنده با فیبوناچی «حرکت دوم» و تنظیمات پیش‌فرضش (config.FIB_LIVE_DEFAULTS)."""
     if paper_trader.get_setting(conn, "defaults_v14", None) is not None:
@@ -184,6 +195,8 @@ def get_bot_settings():
         "early_exit": paper_trader.get_setting(conn, "early_exit", "1" if config.EARLY_EXIT else "0") == "1",
         "daily_loss": daily_loss,
         "cut_loss_r": cut_loss_r,
+        "pat_structure": paper_trader.get_setting(conn, "pat_structure", config.PAT_STRUCTURE)
+        if paper_trader.get_setting(conn, "pat_structure", config.PAT_STRUCTURE) in ("with", "off") else "with",
     }
 
 
@@ -191,7 +204,7 @@ def live_config_snapshot(settings=None):
     """تنظیمات فعلی ربات زنده به همون فرمتی که «مقایسه‌ی استراتژی‌ها» می‌فهمه."""
     st = settings or get_bot_settings()
     return {"timeframe": st["timeframe"], "active_strategies": st["active_strategies"],
-            "combine_mode": st["combine_mode"], "min_score": st["min_score"],
+            "combine_mode": st["combine_mode"], "min_score": st["min_score"], "free": st["pat_structure"] == "off",
             "trail_profile": st["trail_profile"], "retest": st["retest"], "early_exit": st["early_exit"],
             "daily_loss": st["daily_loss"] > 0, "cut_loss_r": st["cut_loss_r"],
             "strictness": st["strictness"], "trailing": st["trail_profile"] if st["trailing_enabled"] else False,
@@ -249,6 +262,7 @@ def get_effective_cfg(settings):
         "EARLY_EXIT": settings["early_exit"],
         "DAILY_LOSS_LIMIT_USD": settings["daily_loss"],
         "CUT_LOSS_R": settings["cut_loss_r"],
+        "PAT_STRUCTURE": settings.get("pat_structure", config.PAT_STRUCTURE),
     }
     # پروفایل تایم‌فریم انتخاب‌شده (تایم‌فریم‌های تایید، کول‌داون، حد زمانی، ...)
     cfg = fast_backtest.profile_cfg(config, settings["timeframe"])
@@ -681,6 +695,8 @@ def api_data():
         "trail_profile": settings["trail_profile"],
         "trail_profiles": {k: v["label"] for k, v in config.TRAIL_PROFILES.items()},
         "strategy": settings["strategy"],
+        "pat_structure": settings["pat_structure"],
+        "pat_info": {"count": len(__import__("patterns").pattern_names(config.PAT_SET)), "min_sl": config.PAT_MIN_SL_ATR},
         "fib_info": {"impulse": config.FIB_MIN_IMPULSE_ATR, "zone": f"{config.FIB_ZONE_LO:g} تا {config.FIB_ZONE_HI:g}",
                      "vp": config.FIB_VP_BARS},
         "strategy_labels": {**{k: v["short"] for k, v in strategies.STRATEGY_REGISTRY.items()},
@@ -798,6 +814,9 @@ def api_control():
             log.info(f"[کنترل پنل] استراتژی: {body['strategy']}")
         else:
             return jsonify({"ok": False, "error": "استراتژی نامعتبر است"}), 400
+    if body.get("pat_structure") in ("with", "off"):
+        paper_trader.set_setting(conn, "pat_structure", body["pat_structure"])
+        log.info(f"[کنترل پنل] ساختار بازار برای الگوها: {body['pat_structure']}")
     if "cut_loss_r" in body:
         try:
             cr = float(body["cut_loss_r"])
@@ -1247,7 +1266,7 @@ def api_compare_start():
     body = request.get_json(force=True, silent=True) or {}
     days = max(60, min(int(body.get("days", 365)), 1095))
     top_n = max(3, min(int(body.get("top_n", 20)), 60))
-    grid = body.get("grid") if body.get("grid") in ("full", "focus", "all", "fib") else "quick"
+    grid = body.get("grid") if body.get("grid") in ("full", "focus", "all", "fib", "pattern") else "quick"
     tfs = [t for t in (body.get("timeframes") or ["15m", "1h", "4h"]) if t in config.TIMEFRAME_PROFILES]
     if not tfs:
         return jsonify({"ok": False, "error": "حداقل یک تایم‌فریم انتخاب کن"}), 400
@@ -1479,6 +1498,8 @@ def api_compare_apply():
         paper_trader.set_setting(conn, "cut_loss_r", float(c["cut_loss_r"]))
     if "retest" in c:
         paper_trader.set_setting(conn, "brk_retest", "1" if c["retest"] else "0")
+    if "free" in c:
+        paper_trader.set_setting(conn, "pat_structure", "off" if c["free"] else "with")
     if "early_exit" in c:
         paper_trader.set_setting(conn, "early_exit", "1" if c["early_exit"] else "0")
     if "daily_loss" in c:
@@ -1810,6 +1831,7 @@ def api_data_cache():
 
 if __name__ == "__main__":
     _apply_live_defaults_v14()
+    _apply_live_defaults_v16()
     scheduler.start()
     threading.Thread(target=_auto_resume_entry, daemon=True).start()
     log.info("ربات معامله‌گر مجازی استارت شد.")

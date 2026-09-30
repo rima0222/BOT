@@ -25,12 +25,13 @@ import sim_engine
 
 STRATEGIES = ["box_breakout", "weighted_confluence"]
 STRATEGY_LABELS = {"box_breakout": "شکست باکس", "weighted_confluence": "ترکیبی وزن‌دار", "trend_follow": "روندگیر",
-                   "xs_momentum": "مومنتوم هفتگی", "fib_phase": "فیبوناچی حرکت دوم"}
+                   "xs_momentum": "مومنتوم هفتگی", "fib_phase": "فیبوناچی حرکت دوم",
+                   "pattern_structure": "الگو + ساختار بازار"}
 TRAIL_FA = {"strict": "تریلینگ سخت‌گیر", "tight": "تریلینگ حساس", "balanced": "تریلینگ متعادل", "loose": "تریلینگ پلکانی"}
 TF_LABELS = {"1m": "۱ دقیقه (اسکلپ)", "5m": "۵ دقیقه (اسکلپ)", "15m": "۱۵ دقیقه", "1h": "۱ ساعته", "4h": "۴ ساعته",
              "1d": "روزانه"}
 STRICT_FA = {"loose": "سبک‌گیر", "normal": "معمولی", "strict": "سخت‌گیر", "very_strict": "خیلی سخت‌گیر"}
-FLAG_DIMS = ("htf", "min_sl", "room", "btc_filter", "long_only", "retest", "early_exit", "daily_loss")
+FLAG_DIMS = ("htf", "min_sl", "room", "btc_filter", "long_only", "retest", "early_exit", "daily_loss", "free")
 
 
 def _strat(conf):
@@ -70,6 +71,8 @@ def describe(conf):
     parts += [htf_txt] + ([] if only_trend else [_trail_txt(conf["trailing"])])
     if "box_breakout" in acts:
         parts.append("ورود با پولبک" if conf.get("retest") else "ورود روی شکست")
+    if "pattern_structure" in acts:
+        parts.append("بدون فیلتر ساختار داو" if conf.get("free") else "هم‌جهت ساختار داو (HH/HL، LH/LL)")
     if conf.get("cut"):
         parts.append(f"بستن در ‎-{conf['cut']:g}R")
     if conf.get("early_exit"):
@@ -134,7 +137,12 @@ def evaluate(preps, order, cfg, conf, split_ms, record=False, merged_cache=None)
 def _engine_active(conf):
     out = []
     for st in (conf.get("active_strategies") or ["weighted_confluence"]):
-        out.append("box_breakout@retest" if (st == "box_breakout" and conf.get("retest")) else st)
+        if st == "box_breakout" and conf.get("retest"):
+            out.append("box_breakout@retest")
+        elif st == "pattern_structure" and conf.get("free"):
+            out.append("pattern_structure@free")
+        else:
+            out.append(st)
     return out
 
 
@@ -245,6 +253,15 @@ def run_timeframe(preps, symbols, cfg, tf, start_ms, end_ms, grid="quick", progr
                     for cut in (0.0, 0.6):
                         confs.append(_conf(tf, combo, 70 if "weighted_confluence" in combo else None, st, htf,
                                            trailing, True, False, False, False, True, False, True, cut))
+    elif grid == "pattern":
+        # الگو + ساختار بازار: با/بدون فیلتر ساختار × مدیریت (RR2 ثابت، سه تریلینگ، بستن در ‎-0.5R، تریلینگ + بستن)
+        for free in (False, True):
+            for trailing, cut in ((False, 0.0), ("strict", 0.0), ("balanced", 0.0), ("loose", 0.0),
+                                  (False, 0.5), ("balanced", 0.5)):
+                cf = _conf(tf, "pattern_structure", None, "normal", False, trailing, False, False, False, False,
+                           False, False, True, cut)
+                cf["free"] = free
+                confs.append(cf)
     elif grid == "fib":
         # فیبوناچی «حرکت دوم»: حداقل امتیاز × مدیریت (RR2 ثابت / بستن در ‎-0.5R / تریلینگ سخت‌گیر / هر دو) × تایید HTF
         for htf, st in [(False, "normal"), (True, "normal")]:
@@ -332,7 +349,8 @@ def write_results_csv(results, path):
     segs = ("is", "oos", "full")
     mets = ("trades", "wins", "losses", "win_rate", "trail_trades", "trail_pnl", "trail_pct", "avg_r", "r_lcb",
             "profit_factor", "return_pct", "max_dd_pct", "pos_months_pct", "fees", "long_trades", "short_trades",
-            "avg_bars")
+            "avg_bars", "pos_rate", "avg_week_usd", "pos_weeks_pct", "worst_week_usd", "avg_month_usd",
+            "worst_month_usd", "best_month_usd", "trades_per_week")
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         w.writerow(fields + [f"{s}_{m}" for s in segs for m in mets])
@@ -399,7 +417,8 @@ def _paired_effects(results):
             ("retest", "ورود با پولبک (در برابر ورود روی کندل شکست)"),
             ("early_exit", "خروج زودهنگام (اگه تا چند کندل جلو نرفت)"),
             ("daily_loss", "حد ضرر روزانه"),
-            ("cut", "بستن زودتر در ضرر (‎-0.5R / ‎-0.6R) در برابر حد ضرر کامل")]
+            ("cut", "بستن زودتر در ضرر (‎-0.5R / ‎-0.6R) در برابر حد ضرر کامل"),
+            ("free", "الگو بدون فیلتر ساختار داو (در برابر فقط هم‌جهت ساختار)")]
 
     def summarize(dim, label, pairs):
         d = [a["full"]["avg_r"] - b["full"]["avg_r"] for a, b in pairs]

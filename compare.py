@@ -59,7 +59,7 @@ def main():
     ap.add_argument("--symbols", type=str, default="", help="لیست نماد با کاما (به‌جای --top)")
     ap.add_argument("--timeframes", type=str, default="15m,1h,4h",
                     help="تایم‌فریم‌ها با کاما: 1m,5m (اسکلپ) 15m,1h,4h (نوسان‌گیری)")
-    ap.add_argument("--grid", choices=["quick", "full", "focus", "all", "fib"], default="quick",
+    ap.add_argument("--grid", choices=["quick", "full", "focus", "all", "fib", "pattern"], default="quick",
                     help="focus = فقط استراتژی شکست باکس و گزینه‌های جدیدش (سریع)")
     ap.add_argument("--job-id", type=str, default="")
     ap.add_argument("--progress-file", type=str, default="")
@@ -553,7 +553,8 @@ def print_summary(report, path=None):
         out("\nپیشنهاد:", b["label"])
         for seg, name in (("is", "آموزش"), ("oos", "آزمون"), ("full", "کل")):
             x = b[seg]
-            out(f"  {name:6s}: {x['trades']:4d} معامله | وین‌ریت {x['win_rate']:5.1f}% | میانگین {x['avg_r']:+.3f}R "
+            out(f"  {name:6s}: {x['trades']:4d} معامله | سودده {x.get('pos_rate', 0):5.1f}% | میانگین {x['avg_r']:+.3f}R "
+                f"| هفته‌ای {x.get('avg_week_usd', 0):+.2f}$ ({x.get('pos_weeks_pct', 0):.0f}% هفته‌ها مثبت) "
                   f"| ضریب سود {x['profit_factor']:.2f} | بازده {x['return_pct']:+.1f}% | افت {x['max_dd_pct']:.1f}%")
     out("\nخلاصه‌ی تایم‌فریم‌ها:")
     for t in report.get("timeframe_summary", []):

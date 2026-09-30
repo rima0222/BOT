@@ -563,7 +563,8 @@ def metrics(trades, equity, start_balance, t_from=None, t_to=None):
     # برد/باخت فقط از معاملاتی که به هدف R:R یا حد ضرر اولیه رسیدن؛ تریلینگ جدا
     res_kind = [paper_trader.result_of(t["exit_type"]) for t in sel]
     wins = res_kind.count("WIN")
-    losses = res_kind.count("LOSS")
+    # بستن در ‎-xR (CUT) هم باخته (حد ضرر زودتر)؛ قبلاً حساب نمی‌شد و وین‌ریت الکی ۱۰۰٪ نشون می‌داد
+    losses = res_kind.count("LOSS") + sum(1 for t in sel if t["exit_type"] == "CUT")
     trail_pnl = float(sum(t["pnl"] for t, k in zip(sel, res_kind) if k == "TRAIL"))
     early_pnl = float(sum(t["pnl"] for t, k in zip(sel, res_kind) if k == "EARLY"))
     gp = float(pnls[pnls > 0].sum())

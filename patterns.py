@@ -230,6 +230,21 @@ def chart_patterns(o, h, l, c, atr, order=3, max_age=30, tol_atr=0.5):
         def flat_break_dn(level, since):
             return ct < level and cp >= level and (since + 1 >= t or float(np.min(c[since + 1:t])) >= level)
 
+        def slope_break(p1, p2, since, up):
+            """اولین بسته‌شدن بیرون خط شیب‌دار (خط گردن/ضلع) از بعد از آخرین نقطه‌ی الگو — نه عبور دوباره."""
+            lt = line(p1, p2, t)
+            if up:
+                if not (ct > lt and cp <= line(p1, p2, t - 1)):
+                    return False
+            elif not (ct < lt and cp >= line(p1, p2, t - 1)):
+                return False
+            ks = np.arange(since + 1, t)
+            if len(ks):
+                lv = p1[2] + (p2[2] - p1[2]) * (ks - p1[1]) / (p2[1] - p1[1])
+                if (up and (c[ks] > lv).any()) or (not up and (c[ks] < lv).any()):
+                    return False
+            return True
+
         # --- کف/سقف دوقلو ---
         a, b, d = Z[-3], Z[-2], Z[-1]
         if fresh and a[0] == 0 and b[0] == 1 and d[0] == 0 and abs(d[2] - a[2]) <= tol \
@@ -248,8 +263,8 @@ def chart_patterns(o, h, l, c, atr, order=3, max_age=30, tol_atr=0.5):
                     emit("pat_triple", "L", t, min(lows) - 0.2 * A)
                 # سر و شونه‌ی معکوس
                 if p3[2] < min(p1[2], p5[2]) - 0.5 * A and abs(p1[2] - p5[2]) <= 2 * tol:
-                    nl_t, nl_p = line(p2, p4, t), line(p2, p4, t - 1)
-                    if ct > nl_t and cp <= nl_p and nl_t - p3[2] >= 1.5 * A:
+                    nl_t = line(p2, p4, t)
+                    if slope_break(p2, p4, p5[1], True) and nl_t - p3[2] >= 1.5 * A:
                         emit("pat_hs", "L", t, p5[2] - 0.2 * A)
             if fresh and [p[0] for p in (p1, p2, p3, p4, p5)] == [1, 0, 1, 0, 1]:
                 highs = [p1[2], p3[2], p5[2]]
@@ -257,8 +272,8 @@ def chart_patterns(o, h, l, c, atr, order=3, max_age=30, tol_atr=0.5):
                 if max(highs) - min(highs) <= tol and min(highs) - neck >= 1.5 * A and flat_break_dn(neck, p5[1]):
                     emit("pat_triple", "S", t, max(highs) + 0.2 * A)
                 if p3[2] > max(p1[2], p5[2]) + 0.5 * A and abs(p1[2] - p5[2]) <= 2 * tol:
-                    nl_t, nl_p = line(p2, p4, t), line(p2, p4, t - 1)
-                    if ct < nl_t and cp >= nl_p and p3[2] - nl_t >= 1.5 * A:
+                    nl_t = line(p2, p4, t)
+                    if slope_break(p2, p4, p5[1], False) and p3[2] - nl_t >= 1.5 * A:
                         emit("pat_hs", "S", t, p5[2] + 0.2 * A)
         if len(Z) >= 4 and fresh:
             q = Z[-4:]
@@ -276,22 +291,23 @@ def chart_patterns(o, h, l, c, atr, order=3, max_age=30, tol_atr=0.5):
                     sup = min(L1[2], L2[2])
                     if flat_break_dn(sup, H2[1]):
                         emit("pat_triangle_flat", "S", t, H2[2] + 0.2 * A)
-                up_t, up_p = line(H1, H2, t), line(H1, H2, t - 1)
-                lo_t, lo_p = line(L1, L2, t), line(L1, L2, t - 1)
+                up_t = line(H1, H2, t)
+                lo_t = line(L1, L2, t)
                 if up_t > lo_t:
                     # --- مثلث متقارن ---
                     if H2[2] < H1[2] - 0.3 * A and L2[2] > L1[2] + 0.3 * A:
-                        if ct > up_t and cp <= up_p:
+                        if slope_break(H1, H2, last[1], True):
                             emit("pat_triangle_sym", "L", t, L2[2] - 0.2 * A)
-                        elif ct < lo_t and cp >= lo_p:
+                        elif slope_break(L1, L2, last[1], False):
                             emit("pat_triangle_sym", "S", t, H2[2] + 0.2 * A)
                     # --- کنج‌ها ---
                     sh_ = (H2[2] - H1[2]) / (H2[1] - H1[1])
                     sl_ = (L2[2] - L1[2]) / (L2[1] - L1[1])
-                    if H2[2] < H1[2] and L2[2] < L1[2] and sh_ < sl_ < 0 and ct > up_t and cp <= up_p:
-                        emit("pat_wedge", "L", t, min(L1[2], L2[2]) - 0.2 * A)
-                    if H2[2] > H1[2] and L2[2] > L1[2] and sl_ > sh_ > 0 and ct < lo_t and cp >= lo_p:
-                        emit("pat_wedge", "S", t, max(H1[2], H2[2]) + 0.2 * A)
+                    # حد ضرر کنج: آخرین کف (خرید) / سقف (فروش) الگو؛ باید سمت درست ورود باشه (پایین‌تر چک می‌شه)
+                    if H2[2] < H1[2] and L2[2] < L1[2] and sh_ < sl_ < 0 and slope_break(H1, H2, last[1], True):
+                        emit("pat_wedge", "L", t, L2[2] - 0.2 * A)
+                    if H2[2] > H1[2] and L2[2] > L1[2] and sl_ > sh_ > 0 and slope_break(L1, L2, last[1], False):
+                        emit("pat_wedge", "S", t, H2[2] + 0.2 * A)
                 # --- فنجان و دسته ---
                 if [p[0] for p in q] == [1, 0, 1, 0]:
                     R1, B, R2, Hd = q
@@ -339,13 +355,16 @@ def chart_patterns(o, h, l, c, atr, order=3, max_age=30, tol_atr=0.5):
 
 def talib_patterns(o, h, l, c, atr):
     """تعریف‌های استاندارد TA-Lib (کد مرجع: github.com/TA-Lib/ta-lib). هر الگو فقط از کندل‌های تا همون لحظه
-    استفاده می‌کنه. حد ضرر: زیر کف/بالای سقف ۳ کندل آخر (+۰.۱ ATR)."""
+    استفاده می‌کنه. حد ضرر: زیر کف/بالای سقف ۵ کندل آخر (+۰.۱ ATR؛ الگوهای تا ۵ کندلی رو کامل می‌پوشونه)."""
     if talib is None:
         return {}
     o, h, l, c = [np.ascontiguousarray(x, dtype=np.float64) for x in (o, h, l, c)]
     buf = 0.1 * atr
-    lo3 = np.fmin(np.fmin(l, _sh(l, 1)), _sh(l, 2))
-    hi3 = np.fmax(np.fmax(h, _sh(h, 1)), _sh(h, 2))
+    lo3 = l.copy()
+    hi3 = h.copy()
+    for k in range(1, 5):
+        lo3 = np.fmin(lo3, _sh(l, k))
+        hi3 = np.fmax(hi3, _sh(h, k))
     ok = np.isfinite(atr) & (atr > 0)
     out = {}
     for fn, _ in TALIB_PATTERNS:
@@ -356,8 +375,25 @@ def talib_patterns(o, h, l, c, atr):
     return out
 
 
+def _valid_stop(out, c):
+    """فقط ورودهایی که حد ضررشون سمت درسته (خرید: زیر قیمت ورود، فروش: بالای قیمت ورود)."""
+    res = {}
+    for k, lst in out.items():
+        new = []
+        for sd, idx, slv in lst:
+            ok = (slv < c[idx]) if sd > 0 else (slv > c[idx])
+            ok &= np.isfinite(slv)
+            new.append((sd, idx[ok], slv[ok]))
+        res[k] = new
+    return res
+
+
 def all_patterns(o, h, l, c, atr, order=3):
-    """{name: [(side(+1/-1), idx, sl), ...]} برای همه‌ی الگوها."""
+    """{name: [(side(+1/-1), idx, sl), ...]} برای همه‌ی الگوها (حد ضرر سمت اشتباه = حذف)."""
+    return _valid_stop(_all_patterns(o, h, l, c, atr, order), c)
+
+
+def _all_patterns(o, h, l, c, atr, order=3):
     out = {}
     for k, (ml, ms, sl_l, sl_s) in talib_patterns(o, h, l, c, atr).items():
         il, is_ = np.flatnonzero(ml), np.flatnonzero(ms)
@@ -368,3 +404,40 @@ def all_patterns(o, h, l, c, atr, order=3):
     for k, d in chart_patterns(o, h, l, c, atr, order).items():
         out[k] = [(1, d["L"][0], d["L"][1]), (-1, d["S"][0], d["S"][1])]
     return out
+
+
+# ==================== سیگنال استراتژی «الگو + ساختار بازار» ====================
+PATTERN_SETS = {
+    "all": lambda: list(ALL_PATTERNS),
+    "own": lambda: [k for k, _, _ in CANDLE_PATTERNS],
+    "chart": lambda: [k for k, _, _ in CHART_PATTERNS],
+    "talib": lambda: list(TALIB_NAMES),
+    "own+chart": lambda: [k for k, _, _ in CANDLE_PATTERNS + CHART_PATTERNS],
+}
+
+
+def pattern_names(pset):
+    return PATTERN_SETS.get(pset, PATTERN_SETS["all"])()
+
+
+def pattern_signals(o, h, l, c, atr, order, names):
+    """
+    برای هر کندل: اولین الگوی خرید/فروش (به ترتیب names) و حد ضرر خودش.
+    خروجی: (sl_long, name_long, sl_short, name_short) — NaN / -1 یعنی الگویی نیست.
+    """
+    n = len(c)
+    allp = all_patterns(o, h, l, c, atr, order)
+    out = []
+    for side in (1, -1):
+        sl = np.full(n, np.nan)
+        nm = np.full(n, -1, dtype=np.int64)
+        for j in range(len(names) - 1, -1, -1):     # از آخر به اول: اولویت با اولین اسم
+            lst = allp.get(names[j])
+            if not lst:
+                continue
+            for sd, idx, slv in lst:
+                if sd == side and len(idx):
+                    sl[idx] = slv
+                    nm[idx] = j
+        out += [sl, nm]
+    return tuple(out)

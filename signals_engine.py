@@ -26,7 +26,8 @@ import indicators as ind
 import market_data
 import money
 
-STRATEGY_NAMES = ["weighted_confluence", "box_breakout", "box_breakout@retest", "trend_follow", "fib_phase"]
+STRATEGY_NAMES = ["weighted_confluence", "box_breakout", "box_breakout@retest", "trend_follow", "fib_phase",
+                  "pattern_structure", "pattern_structure@free"]
 LONG, SHORT = 1, -1
 
 
@@ -224,6 +225,42 @@ def compute_structural(series, cfg, first_idx=0):
         out["trend_follow"] = _structural_trend(series, cfg, ctx)
     if "fib_phase" in names:
         out["fib_phase"] = _structural_fib(series, cfg, ctx, W)
+    if any(nm.startswith("pattern_structure") for nm in names):
+        out.update(_structural_pattern(series, cfg, ctx))
+    return out
+
+
+def _structural_pattern(series, cfg, ctx):
+    """
+    معادل strategies.generate_pattern_structure: همون کتابخونه‌ی الگو روی کل سری (الگوها فقط به کندل‌های
+    گذشته‌ی نزدیک و سوینگ‌های تاییدشده وابسته‌ان) + همون تابع مشترک strategies.pattern_setup.
+    دو کلید: با فیلتر ساختار داو و بدون اون (@free).
+    """
+    import patterns
+    import strategies
+    c = series.c
+    atr, in_range, trend = ctx["atr"], ctx["in_range"], ctx["trend"]
+    wlen = ctx["wlen"]
+    names = patterns.pattern_names(getattr(cfg, "PAT_SET", "all"))
+    sig = patterns.pattern_signals(series.o, series.h, series.l, c, atr, int(cfg.SWING_ORDER), names)
+    base = in_range & ctx["atr_ok"] & (wlen >= 50)
+    out = {}
+    for key, mode in (("pattern_structure", "with"), ("pattern_structure@free", "off")):
+        class _C:
+            PAT_STRUCTURE = mode
+            PAT_MIN_SL_ATR = cfg.PAT_MIN_SL_ATR
+        pair = []
+        for side, arr_i in (("LONG", 1), ("SHORT", 3)):
+            idx_l, sl_l = [], []
+            for t in np.flatnonzero(base & (sig[arr_i] >= 0)).tolist():
+                st = strategies.pattern_setup(side, c, atr, int(trend[t]), t, sig, _C)
+                if st is not None:
+                    idx_l.append(t)
+                    sl_l.append(st[0])
+            idx = np.array(idx_l, dtype=np.int64)
+            pair.append(Structural(idx, np.array(sl_l, dtype=np.float64), np.full(len(idx), np.nan), atr[idx],
+                                   False, np.full(len(idx), np.nan), use_score=False))
+        out[key] = tuple(pair)
     return out
 
 

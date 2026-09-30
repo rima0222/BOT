@@ -500,6 +500,59 @@ def generate_fib_phase(df, cfg):
     return res
 
 
+# ==================== الگو + ساختار بازار (pattern_structure) ====================
+
+def pattern_setup(side, c, atr, trend, t, sig, cfg):
+    """مشترک بین ربات زنده و موتور بک‌تست. sig = خروجی patterns.pattern_signals. None یا (حد ضرر، شماره‌ی الگو)."""
+    long = side == "LONG"
+    slv, nm = (sig[0], sig[1]) if long else (sig[2], sig[3])
+    if nm[t] < 0 or not (atr[t] > 0):
+        return None
+    if getattr(cfg, "PAT_STRUCTURE", "with") == "with" and trend != (1 if long else -1):
+        return None
+    d = float(cfg.PAT_MIN_SL_ATR) * float(atr[t])
+    stop = min(float(slv[t]), float(c[t]) - d) if long else max(float(slv[t]), float(c[t]) + d)
+    return stop, int(nm[t])
+
+
+def generate_pattern_structure(df, cfg):
+    """الگوی کندلی/کلاسیک + ساختار بازار داو، روی آخرین کندل بسته‌شده‌ی پنجره."""
+    import patterns
+    name = "pattern_structure"
+    price = float(df["close"].iloc[-1])
+    res = {"trend": "sideways", "price": price, "support": None, "resistance": None, "atr": None,
+           "signal": None, "strategy": name}
+    n = len(df)
+    if n < 50:
+        return res
+    swing_highs, swing_lows = analysis.find_swings(df, order=cfg.SWING_ORDER)
+    trend = analysis.determine_trend(swing_highs, swing_lows)
+    support, resistance = analysis.get_support_resistance(swing_highs, swing_lows, price, cfg.SR_CLUSTER_PCT)
+    res.update({"trend": trend, "support": support, "resistance": resistance})
+    atr_s = analysis.compute_atr(df, cfg.ATR_PERIOD).values
+    if not (atr_s[-1] > 0):
+        return res
+    res["atr"] = float(atr_s[-1])
+    o = df["open"].values.astype(float)
+    h = df["high"].values.astype(float)
+    l = df["low"].values.astype(float)
+    c = df["close"].values.astype(float)
+    names = patterns.pattern_names(getattr(cfg, "PAT_SET", "all"))
+    sig = patterns.pattern_signals(o, h, l, c, atr_s, int(cfg.SWING_ORDER), names)
+    tr = {"uptrend": 1, "downtrend": -1}.get(trend, 0)
+    for side in ("LONG", "SHORT"):
+        st = pattern_setup(side, c, atr_s, tr, n - 1, sig, cfg)
+        if st is None:
+            continue
+        out = analysis.finalize_signal(side, price, st[0], None, float(atr_s[-1]), cfg, tp_uses_level=False)
+        if out:
+            out.update({"score": None, "reasons": ["pattern:" + names[st[1]], "structure"],
+                        "pattern": patterns.label(names[st[1]])})
+            res["signal"] = out
+            return res
+    return res
+
+
 # ==================== مومنتوم نسبی هفتگی (cross-sectional momentum) ====================
 DAY_MS = 86_400_000
 
@@ -581,6 +634,11 @@ STRATEGY_REGISTRY = {
         "label": "فیبوناچی «حرکت دوم»: اصلاح به ناحیه‌ی طلایی + امتیاز (RSI، حجم، پروفایل حجم، سطح، داو)",
         "short": "فیبوناچی حرکت دوم",
     },
+    "pattern_structure": {
+        "fn": generate_pattern_structure,
+        "label": "الگو + ساختار بازار: الگوی کندلی/کلاسیک هم‌جهت با سقف و کف‌های داو (HH/HL، LH/LL)، RR2 + تریلینگ",
+        "short": "الگو + ساختار بازار",
+    },
     "xs_momentum": {
         "fn": _xs_placeholder,
         "label": "مومنتوم نسبی هفتگی: خرید قوی‌ترین‌ها، فروش ضعیف‌ترین‌ها (فقط روزانه)",
@@ -616,6 +674,8 @@ def active_strategies(cfg):
 def engine_key(name, cfg):
     if name == "box_breakout" and getattr(cfg, "BRK_ENTRY", "close") == "retest":
         return "box_breakout@retest"
+    if name == "pattern_structure" and getattr(cfg, "PAT_STRUCTURE", "with") == "off":
+        return "pattern_structure@free"
     return name
 
 
@@ -627,7 +687,15 @@ def engine_names(cfg):
 def reason_labels(reasons):
     out = []
     for r in reasons or []:
-        out.append(COMPONENT_LABELS.get(r) or BREAKOUT_LABELS.get(r) or FIB_LABELS.get(str(r)[4:]) or r)
+        rs = str(r)
+        if rs.startswith("pattern:"):
+            import patterns
+            out.append(patterns.label(rs[8:]))
+            continue
+        if rs == "structure":
+            out.append("ساختار داو هم‌جهت")
+            continue
+        out.append(COMPONENT_LABELS.get(r) or BREAKOUT_LABELS.get(r) or FIB_LABELS.get(rs[4:]) or r)
     return out
 
 

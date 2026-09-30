@@ -85,7 +85,8 @@ VARIANTS = [
 def live_cfg_for(name, cfg):
     """تابع زنده و تنظیمات معادل هر کلید موتور (box_breakout@retest = شکست باکس با ورود پولبک)."""
     base = name.split("@")[0]
-    c = backtest.build_config(cfg, {"BRK_ENTRY": "retest" if name.endswith("@retest") else "close"})
+    c = backtest.build_config(cfg, {"BRK_ENTRY": "retest" if name.endswith("@retest") else "close",
+                                    "PAT_STRUCTURE": "off" if name.endswith("@free") else "with"})
     return strategies.STRATEGY_REGISTRY[base]["fn"], c
 
 
@@ -150,7 +151,8 @@ def test_combined_live_wrapper():
     for name in se.STRATEGY_NAMES:
         cfg = make_cfg(WC_MIN_SCORE_PCT=0 if name == "fib_phase" else 60, MIN_SL_PCT=0.3,
                        ACTIVE_STRATEGIES=[name.split("@")[0]],
-                       BRK_ENTRY="retest" if name.endswith("@retest") else "close")
+                       BRK_ENTRY="retest" if name.endswith("@retest") else "close",
+                       PAT_STRUCTURE="off" if name.endswith("@free") else "with")
         check(strategies.engine_name(cfg) == name, f"engine_name اشتباه برای {name}")
         W = cfg.CANDLE_LIMIT
         st = se.compute_structural(series, cfg, 0)
@@ -680,6 +682,44 @@ def test_fib_dense():
           f"میانگین هفتگی {m['avg_week_usd']}$، {m['pos_weeks_pct']}٪ هفته‌ها مثبت")
 
 
+def test_pattern_structure_dense():
+    print("۱۴) الگو + ساختار بازار: همه‌ی کندل‌ها موتور == ربات زنده (با/بدون فیلتر ساختار، چند مجموعه الگو)")
+    total = mism = 0
+    for seed, over in ((81, {}), (82, {"PAT_STRUCTURE": "off", "PAT_SET": "own+chart"}),
+                       (83, {"PAT_SET": "talib", "PAT_MIN_SL_ATR": 1.0})):
+        arr = synth(1500, seed=seed)
+        series = se.Series(arr, "15m")
+        cfg = make_cfg(ACTIVE_STRATEGIES=["pattern_structure"], **over)
+        key = strategies.engine_name(cfg)
+        W = cfg.CANDLE_LIMIT
+        structural = se.compute_structural(series, cfg, 0)
+        prep_like = fast_backtest.SymbolPrep("T", series, structural, None, None, None, 0, cfg)
+        f = prep_like.finals(key, fast_backtest.variant_from_cfg(cfg))
+        eng = {int(i): k for k, i in enumerate(f.idx)}
+        for t in range(W - 1, series.n):
+            live = strategies.generate_pattern_structure(series.to_df(t - W + 1, t + 1), cfg).get("signal")
+            k = eng.get(t)
+            if (live is None) != (k is None):
+                mism += 1
+                if mism <= 3:
+                    check(False, f"الگو+ساختار t={t}: زنده={live} موتور={'-' if k is None else f.sl[k]}")
+                continue
+            if live is not None:
+                total += 1
+                if not (live["side"] == ("LONG" if f.side[k] == 1 else "SHORT") and close_enough(live["sl"], f.sl[k])
+                        and close_enough(live["tp"], f.tp[k])):
+                    mism += 1
+    check(mism == 0 and total >= 100, f"الگو+ساختار: {mism} عدم تطابق از {total} سیگنال")
+    arrs = {f"P{i}/USDT": synth(3000, seed=95 + i, price=10 + i * 5) for i in range(3)}
+    cfg = make_cfg(ACTIVE_STRATEGIES=["pattern_structure"], HTF_TIMEFRAMES=["1h", "4h"], USE_HTF_CONFIRMATION=False,
+                   USE_TRAILING_SL=True, TRAIL_PROFILE="balanced")
+    preps = _build_preps(arrs, cfg, int(arrs["P0/USDT"][400, 0]))
+    res, _ = fast_backtest.run_single(preps, list(arrs), cfg)
+    types = sorted({t["exit_type"] for t in res["trades"]})
+    check(len(res["trades"]) > 20, f"سبد الگو+ساختار: {len(res['trades'])} معامله")
+    print(f"  ✓ {total} سیگنال روی همه‌ی کندل‌ها یکسان؛ سبد با تریلینگ: {len(res['trades'])} معامله، خروج‌ها {types}")
+
+
 if __name__ == "__main__":
     t_start = time.time()
     test_strategy_equivalence()
@@ -695,6 +735,7 @@ if __name__ == "__main__":
     test_cut_loss_whatif()
     test_xs_momentum()
     test_fib_dense()
+    test_pattern_structure_dense()
     print()
     if FAILS:
         print(f"❌ {len(FAILS)} خطا")

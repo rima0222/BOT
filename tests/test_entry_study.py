@@ -9,6 +9,8 @@
   6) خطای استاندارد خوشه‌ای == فرمول مرجع
   7) ذخیره‌ی مرحله‌ای روی دیسک + خوندن دوباره == اجرای یک‌جا (پایه‌ی «ادامه از جای قطع‌شده»)
   8) الگوهای کندلی/کلاسیک: شکل‌های ساخته‌شده‌ی دستی درست شناخته می‌شن + بدون نگاه به آینده
+  9) بک‌تست ساده‌ی حلقه‌ای مستقل (باز کردن پوزیشن روی هر الگو، حد ضرر خود الگو، RR2) == عدد سنجش؛
+     حد ضرر همه‌ی الگوها سمت درست قیمت ورود
 اجرا:  python3 tests/test_entry_study.py
 """
 import os
@@ -313,6 +315,71 @@ def test_patterns():
     print(f"  ✓ شکل‌های دستی درست؛ {len(full)} جفت‌الگو، {n_all} مورد روی سری تصادفی، بدون نگاه به آینده")
 
 
+def test_naive_pattern_backtest():
+    print("۹) بک‌تست ساده‌ی مستقل الگوها == سنجش + حد ضرر سمت درست")
+    import patterns
+    cfg = make_cfg(HTF_TIMEFRAMES=["1h", "4h"], ENTRY_STUDY_HORIZON={"15m": 48})
+    arrs = {f"V{i}/USDT": synth(6000, seed=210 + i, price=20 + i) for i in range(3)}
+    syms = list(arrs)
+    start = int(arrs[syms[0]][400, 0])
+    split = int(start + (int(arrs[syms[0]][-1, 0]) - start) * 0.7)
+    st = es.Study(cfg, "15m", split, syms, signal_set="patterns")
+    v = fast_backtest.variant_from_cfg(cfg)
+    preps = {}
+    for sym in syms:
+        a = arrs[sym]
+        htf = {"1h": fast_backtest._resample(a, "15m", "1h"), "4h": fast_backtest._resample(a, "15m", "4h")}
+        preps[sym] = fast_backtest.prepare_symbol(sym, a, htf, None, start, cfg, keep_volume=True)
+        st.add_symbol(preps[sym], v, None, None)
+    st.finish()
+    E, H, gap = st.E, st.H, st.gap
+    bad, wrong_side, checked = 0, 0, 0
+    for name in ("tal_engulfing", "cdl_hammer", "pat_double", "pat_flag", "pat_wedge", "cdl_inside_break"):
+        evs, wins, losses = [], 0, 0
+        for sym in syms:
+            p = preps[sym]
+            ser = p.series
+            o, h, l, c = ser.o, ser.h, ser.l, ser.c
+            atr = fast_backtest._prep_atr(p)
+            for sd, idx, slv in patterns.all_patterns(o, h, l, c, atr, cfg.SWING_ORDER)[name]:
+                wrong_side += int(((slv >= c[idx]) if sd > 0 else (slv <= c[idx])).sum())
+                ok = (idx >= p.first_idx) & np.isfinite(atr[idx]) & (atr[idx] > 0)
+                last = -10 ** 9
+                for i, stop in zip(idx[ok].tolist(), slv[ok].tolist()):
+                    if i - last < gap:
+                        continue
+                    last = i
+                    if i + H > ser.n - 1:
+                        continue
+                    e = c[i]
+                    risk = abs(e - stop)
+                    tp = e + 2 * risk if sd > 0 else e - 2 * risk
+                    res = None
+                    for k in range(i + 1, i + 1 + H):
+                        if (sd > 0 and l[k] <= stop) or (sd < 0 and h[k] >= stop):
+                            res = -1.0
+                            break
+                        if (sd > 0 and h[k] >= tp) or (sd < 0 and l[k] <= tp):
+                            res = 2.0
+                            break
+                    if res is None:
+                        res = (c[i + H] - e) * sd / risk
+                    wins += res == 2.0
+                    losses += res == -1.0
+                    evs.append(res - st.cost_market * e / risk)
+        m = E["sig"] == st.code[name]
+        own = np.isfinite(E["own_res"][m])
+        oo = E["own_out"][m][own]
+        rs = oo != 0
+        same = (len(evs) == int(own.sum()) and abs((oo[rs] == 1).mean() - wins / max(1, wins + losses)) < 1e-9
+                and abs(np.mean(E["own_res"][m][own].astype(float) - E["own_cost"][m][own]) - np.mean(evs)) < 1e-3)
+        bad += int(not same)
+        checked += len(evs)
+    check(bad == 0 and wrong_side == 0 and checked > 500,
+          f"بک‌تست ساده: {bad} الگو فرق داشت، {wrong_side} حد ضرر سمت اشتباه، {checked} معامله")
+    print(f"  ✓ {checked} معامله در ۶ الگو: وین‌ریت و سود هر معامله دقیقاً یکسان؛ هیچ حد ضرری سمت اشتباه نیست")
+
+
 if __name__ == "__main__":
     t0 = time.time()
     test_path_brute()
@@ -322,6 +389,7 @@ if __name__ == "__main__":
     test_planted_edge()
     test_checkpoint_roundtrip()
     test_patterns()
+    test_naive_pattern_backtest()
     print()
     if FAILS:
         print(f"❌ {len(FAILS)} خطا")

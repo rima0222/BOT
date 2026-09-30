@@ -46,7 +46,8 @@ BRACKET_KEYS = ["1_1", "2_1", "3_1", "2_05"]
 BRACKET_FA = ["+1R قبل از −1R", "+2R قبل از −1R", "+3R قبل از −1R", "+2R قبل از −0.5R"]
 MAIN_B = 1   # براکت اصلی برای تحلیل فیلترها: RR2 (هدف ربات)
 
-STRATEGY_SIGNALS = ["weighted_confluence", "box_breakout", "box_breakout@retest", "trend_follow", "fib_phase"]
+STRATEGY_SIGNALS = ["weighted_confluence", "box_breakout", "box_breakout@retest", "trend_follow", "fib_phase",
+                    "pattern_structure"]
 RAW_SIGNALS = ["donch20", "donch55", "ma_cross", "dow_flip", "pullback_trend", "rsi_revert", "bb_revert",
                "squeeze_break", "vol_spike", "big_candle", "btc_lead"]
 
@@ -57,6 +58,7 @@ SIG_FA = {
     "box_breakout@retest": "شکست باکس + پولبک (استراتژی ربات)",
     "trend_follow": "روندگیر دونچیان (استراتژی ربات)",
     "fib_phase": "فیبوناچی حرکت دوم (همه‌ی امتیازها)",
+    "pattern_structure": "الگو + ساختار بازار (استراتژی ربات)",
     "xs_momentum": "مومنتوم هفتگی (استراتژی ربات)",
     "donch20": "شکست سقف/کف ۲۰ کندل",
     "donch55": "شکست سقف/کف ۵۵ کندل",
