@@ -433,6 +433,7 @@
       <div class="controls-row" style="background:rgba(88,166,255,.08); padding:10px; border-radius:8px;">
         <button id="entAllBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">🔬 سنجش همه‌ی ورودها با یک کلیک</button>
         <button id="entPatBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">🕯 سنجش همه‌ی الگوهای کندلی و کلاسیک با یک کلیک</button>
+        <button id="entFundBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">💸 سنجش فاندینگ و اوپن اینترست با یک کلیک</button>
         <span class="hint">استراتژی‌های ربات + ۱۱ فرضیه‌ی شناخته‌شده (شکست، پولبک، برگشت، حجم، BTC...) + ۱۵ فیلتر — روی ۱۵ دقیقه، ۱ ساعته، ۴ ساعته و روزانه، ۲ سال، ۳۰ نماد.
           آخرش فایل کامل رو دانلود کن و بفرست تا با هم بررسی کنیم.</span>
       </div>
@@ -442,7 +443,7 @@
         <label>تعداد نماد:</label>
         <select id="entTopN"><option value="10">۱۰</option><option value="20">۲۰</option><option value="30" selected>۳۰</option><option value="40">۴۰</option><option value="50">۵۰ (رم بیشتر)</option><option value="100">۱۰۰ (کند، دیتای زیاد)</option></select>
         <label>چی سنجیده بشه:</label>
-        <select id="entSignals"><option value="core" selected>استراتژی‌ها + فرضیه‌ها</option><option value="patterns">الگوهای کندلی و کلاسیک</option><option value="all">همه (سنگین)</option></select>
+        <select id="entSignals"><option value="core" selected>استراتژی‌ها + فرضیه‌ها</option><option value="patterns">الگوهای کندلی و کلاسیک</option><option value="funding">فاندینگ و اوپن اینترست</option><option value="all">همه (سنگین)</option></select>
         <label>تایم‌فریم‌ها:</label>
         <span id="entTfChecks" class="opt-grid" style="display:inline-flex;"></span>
         <button id="entStartBtn" class="btn btn-save">▶ شروع سنجش</button>
@@ -466,7 +467,7 @@
           <label>جهت:</label>
           <select id="entSide"><option value="both">خرید و فروش با هم</option><option value="long">فقط خرید</option><option value="short">فقط فروش</option><option value="all">همه</option></select>
           <label>گروه:</label>
-          <select id="entGroup"><option value="all">همه</option><option value="strat">استراتژی‌ها و فرضیه‌ها</option><option value="cdl">🕯 الگوهای کندلی (همه)</option><option value="tal">🕯 فقط تعریف استاندارد TA-Lib</option><option value="pat">📐 الگوهای کلاسیک</option></select>
+          <select id="entGroup"><option value="all">همه</option><option value="strat">استراتژی‌ها و فرضیه‌ها</option><option value="cdl">🕯 الگوهای کندلی (همه)</option><option value="tal">🕯 فقط تعریف استاندارد TA-Lib</option><option value="pat">📐 الگوهای کلاسیک</option><option value="fund">💸 فاندینگ و اوپن اینترست</option></select>
           <label class="switch-label"><input type="checkbox" id="entOnlyGood"> فقط بهتر از شانس</label>
         </div>
         <div id="entBase" class="hint" style="margin:6px 0 10px;"></div>
@@ -1756,6 +1757,13 @@ document.getElementById('entAllBtn').addEventListener('click', () => {
   document.querySelectorAll('#entTfChecks input').forEach(x => x.checked = ['15m','1h','4h','1d'].includes(x.dataset.tf));
   document.getElementById('entStartBtn').click();
 });
+document.getElementById('entFundBtn').addEventListener('click', () => {
+  document.getElementById('entDays').value = '730';
+  document.getElementById('entTopN').value = '30';
+  document.getElementById('entSignals').value = 'funding';
+  document.querySelectorAll('#entTfChecks input').forEach(x => x.checked = ['1h','4h','1d'].includes(x.dataset.tf));
+  document.getElementById('entStartBtn').click();
+});
 document.getElementById('entPatBtn').addEventListener('click', () => {
   document.getElementById('entDays').value = '730';
   document.getElementById('entTopN').value = '40';
@@ -1775,10 +1783,10 @@ document.getElementById('entStartBtn').addEventListener('click', async () => {
 });
 function pollEntry(jobId){
   document.getElementById('entProgressRow').style.display = 'flex';
-  document.getElementById('entStartBtn').disabled = true; document.getElementById('entAllBtn').disabled = true; document.getElementById('entPatBtn').disabled = true;
+  document.getElementById('entStartBtn').disabled = true; document.getElementById('entAllBtn').disabled = true; document.getElementById('entPatBtn').disabled = true; document.getElementById('entFundBtn').disabled = true;
   if(entPollTimer) clearInterval(entPollTimer);
   const stop = () => { clearInterval(entPollTimer); entPollTimer = null; document.getElementById('entProgressRow').style.display = 'none';
-    document.getElementById('entStartBtn').disabled = false; document.getElementById('entAllBtn').disabled = false; document.getElementById('entPatBtn').disabled = false; };
+    document.getElementById('entStartBtn').disabled = false; document.getElementById('entAllBtn').disabled = false; document.getElementById('entPatBtn').disabled = false; document.getElementById('entFundBtn').disabled = false; };
   const tick = async () => {
     try{
       const st = await (await fetch(`/api/compare/status/${jobId}`)).json();
@@ -1801,7 +1809,7 @@ async function loadEntryList(selectId){
     sel.innerHTML = '<option value="">— انتخاب گزارش —</option>' + data.reports.map(r => {
       const d = r.created_at ? new Date(r.created_at+'Z').toLocaleString('fa-IR') : '';
       const st = r.status === 'robust' ? '✓' : (r.status === 'near' ? '◐' : '✗');
-      const ss = {core:'استراتژی‌ها', patterns:'الگوها', all:'همه'}[r.signal_set || 'core'];
+      const ss = {core:'استراتژی‌ها', patterns:'الگوها', funding:'فاندینگ/OI', all:'همه'}[r.signal_set || 'core'];
       return `<option value="${r.job_id}">${st} ${d} — ${ss} — ${(r.timeframes||[]).join('/')}، ${r.days} روز، ${r.symbols} نماد</option>`;
     }).join('');
     if(selectId) sel.value = selectId;
@@ -1849,6 +1857,15 @@ function renderEntry(){
   document.getElementById('entBase').innerHTML = `<b>${tm.label}</b>: ${tm.days} روز، ${tm.symbols.length} نماد، ${tm.events} ورود — آموزش ${dt(tm.start_ms)} تا ${dt(tm.split_ms)}، آزمون تا ${dt(tm.end_ms)} —
     ۱R = ${tm.r_atr}×ATR، افق ${tm.horizon_bars} کندل، کارمزد رفت‌وبرگشت بازار ${tm.cost_market_pct}٪ — ` +
     base.map(b => `<b>شانسی ${ENT_SIDE[b.side]}</b>: +1R/−1R ${pc(b.all.p[0])}، +2R/−1R ${pc(b.all.p[1])}، ارزش خالص RR2 ${rCell(b.all.ev[1])} (کارمزد ${b.all.cost_r}R)`).join(' | ');
+  const dcov = m.deriv_coverage || {};
+  const dk = Object.keys(dcov);
+  if(dk.length){
+    const okF = dk.filter(k => (dcov[k].funding_cov_pct||0) >= 80).length, okO = dk.filter(k => (dcov[k].oi_cov_pct||0) >= 80).length;
+    const exs = [...new Set(dk.map(k => dcov[k].funding_exchange).filter(Boolean))].join('، ') || '—';
+    const exo = [...new Set(dk.map(k => dcov[k].oi_exchange).filter(Boolean))].join('، ') || '—';
+    document.getElementById('entBase').innerHTML += `<br>💸 دیتای فاندینگ با پوشش ≥۸۰٪: <b>${okF} از ${dk.length}</b> ارز (${exs}) — اوپن اینترست: <b>${okO} از ${dk.length}</b> (${exo})` +
+      (okF < dk.length/2 ? ' <span class="num-neg">⚠️ پوشش کمه؛ نتیجه‌ی فاندینگ قابل‌اتکا نیست</span>' : '');
+  }
   let rows = r.signals.filter(x => x.tf===tf && x.signal!=='base' && (side==='all' || x.side===side));
   if(only) rows = rows.filter(x => ['robust','edge_weak_oos','edge_costs','weak'].includes(x.verdict));
   const grp = document.getElementById('entGroup').value;
@@ -1856,6 +1873,7 @@ function renderEntry(){
   if(grp === 'cdl') rows = rows.filter(isCdl);
   else if(grp === 'tal') rows = rows.filter(x => x.signal.startsWith('tal_'));
   else if(grp === 'pat') rows = rows.filter(x => x.signal.startsWith('pat_'));
+  else if(grp === 'fund') rows = rows.filter(x => x.signal.startsWith('fund_') || x.signal.startsWith('oi_'));
   else if(grp === 'strat') rows = rows.filter(x => !isCdl(x) && !x.signal.startsWith('pat_'));
   const RANK = {robust:0, edge_weak_oos:1, edge_costs:2, weak:3, none:4, reverse:5, few:6};
   const bestEv = x => { const b = x.best_b ?? 1; return (x.oos.ev||[])[b] ?? -9; };

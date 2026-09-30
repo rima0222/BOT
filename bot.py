@@ -1556,7 +1556,7 @@ def api_entry_start():
     body = request.get_json(force=True, silent=True) or {}
     days = max(60, min(int(body.get("days", 730)), 1095))
     top_n = max(3, min(int(body.get("top_n", 30)), 100))
-    signals = body.get("signals") if body.get("signals") in ("core", "patterns", "all") else "core"
+    signals = body.get("signals") if body.get("signals") in ("core", "patterns", "funding", "all") else "core"
     tfs = [t for t in (body.get("timeframes") or ["15m", "1h", "4h", "1d"]) if t in config.TIMEFRAME_PROFILES]
     if not tfs:
         return jsonify({"ok": False, "error": "حداقل یک تایم‌فریم انتخاب کن"}), 400

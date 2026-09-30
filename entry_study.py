@@ -36,6 +36,7 @@ import numpy as np
 import analysis
 import fast_backtest
 import indicators as ind
+import market_derivs as md
 import patterns as pat
 import sim_engine
 import signals_engine as se
@@ -48,6 +49,7 @@ MAIN_B = 1   # براکت اصلی برای تحلیل فیلترها: RR2 (هد
 
 STRATEGY_SIGNALS = ["weighted_confluence", "box_breakout", "box_breakout@retest", "trend_follow", "fib_phase",
                     "pattern_structure"]
+DERIV_SIGNALS = ["fund_contra", "fund_squeeze", "oi_flush", "oi_trend"]
 RAW_SIGNALS = ["donch20", "donch55", "ma_cross", "dow_flip", "pullback_trend", "rsi_revert", "bb_revert",
                "squeeze_break", "vol_spike", "big_candle", "btc_lead"]
 
@@ -71,6 +73,10 @@ SIG_FA = {
     "vol_spike": "کندل هم‌جهت با حجم ۳ برابر",
     "big_candle": "ادامه‌ی کندل بزرگ (بیش از ۲ ATR)",
     "btc_lead": "حرکت تند BTC و جاماندن ارز",
+    "fund_contra": "💸 فاندینگ افراطی — خلاف جمعیت (۵٪/۹۵٪ نود روز)",
+    "fund_squeeze": "💸 فاندینگ منفی در روند صعودی (فشار روی فروشنده‌ها) / برعکس",
+    "oi_flush": "💸 تخلیه‌ی اهرم: ریزش OI ≥۱۰٪ + حرکت تند قیمت → برگشت",
+    "oi_trend": "💸 پول اهرمی تازه: رشد OI ≥۱۵٪ هم‌جهت حرکت قیمت → ادامه",
 }
 
 # ویژگی‌های لحظه‌ی ورود (همه «هم‌جهت» شدن: برای فروش علامت برعکس، تا بشه خرید و فروش رو با هم تحلیل کرد)
@@ -91,6 +97,9 @@ FEATURES = [
     ("hour", "ساعت بسته‌شدن کندل (UTC)", "bins", [0, 4, 8, 12, 16, 20, 24]),
     ("weekend", "آخر هفته", "cat", {1: "شنبه/یکشنبه", 0: "روزهای کاری"}),
     ("score", "امتیاز کیفیت استراتژی (فیبوناچی/ترکیبی)", "bins", [0, 34, 50, 67, 84, 100.01]),
+    ("fund_side", "فاندینگ هم‌جهت (٪ در ۸ ساعت؛ مثبت = طرف ما شلوغه)", "q", None),
+    ("fund_pct_side", "رتبه‌ی فاندینگ در ۹۰ روز (هم‌جهت؛ بالا = طرف ما شلوغه)", "bins", [0, 10, 30, 70, 90, 100.01]),
+    ("oi_chg", "تغییر اوپن اینترست ۲۴ ساعت (٪)", "q", None),
 ]
 SIDED = {"trend", "btc", "ma_dist", "mom20", "body", "btc_bar"}
 
@@ -218,6 +227,28 @@ def raw_signals(prep, F, is_btc=False):
     return out
 
 
+def deriv_signals(prep, F, tf_ms):
+    """فرضیه‌های فاندینگ/اوپن اینترست؛ اولین کندلی که شرط برقرار می‌شه (تقاطع)."""
+    c = prep.series.c
+    per_day = max(1, int(round(DAY_MS / tf_ms)))
+    fund, fpct, oi = F["fund"], F["fund_pct"], F["oi_chg"]
+    s100 = F["sma100"]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ret24 = (c / _shift(c, per_day) - 1.0) * 100.0
+
+        def first(m):
+            m = np.asarray(m, dtype=bool)
+            prev = np.r_[False, m[:-1]]
+            return m & ~prev
+        out = {
+            "fund_contra": (first((fpct <= 5) & (fund < 0)), first((fpct >= 95) & (fund > 0))),
+            "fund_squeeze": (first((fund < 0) & (c > s100)), first((fpct >= 90) & (fund > 0) & (c < s100))),
+            "oi_flush": (first((oi <= -10) & (ret24 <= -3)), first((oi <= -10) & (ret24 >= 3))),
+            "oi_trend": (first((oi >= 15) & (ret24 >= 3)), first((oi >= 15) & (ret24 <= -3))),
+        }
+    return out
+
+
 def dedupe(idx, gap):
     """بین دو ورود پشت‌سرهم یک سیگنال (در یک نماد و یک جهت) حداقل gap کندل فاصله (مثل کول‌داون ربات)."""
     if len(idx) == 0 or gap <= 1:
@@ -329,6 +360,10 @@ class Study:
             names += RAW_SIGNALS
         if signal_set in ("patterns", "all"):
             names += list(pat.ALL_PATTERNS)
+        if signal_set in ("funding", "all"):
+            names += DERIV_SIGNALS
+            if signal_set == "funding":
+                names += RAW_SIGNALS    # تا اثر فاندینگ/OI روی ورودهای معمولی هم در «فیلترها» دیده بشه
         self.names = names
         self.code = {nm: i for i, nm in enumerate(names)}
         self.symbols = list(symbols)
@@ -350,7 +385,8 @@ class Study:
             for k, v in d.items():
                 dst[k] = dst.get(k, 0) + int(v)
 
-    def add_symbol(self, prep, variant, btc=None, xs_final=None, is_btc=False, base_samples=3000, keep_part=True):
+    def add_symbol(self, prep, variant, btc=None, xs_final=None, is_btc=False, base_samples=3000, keep_part=True,
+                   deriv=None):
         """ورودهای یک نماد. keep_part=False: فقط در last_part نگه‌داشته می‌شه (برای ذخیره روی دیسک)."""
         self._cur = {}
         self.last_part = None
@@ -359,6 +395,7 @@ class Study:
         n = s.n
         H = self.H
         F = compute_features(prep, cfg, btc)
+        F.update(md.deriv_features(prep.series.close_ts, deriv))
         atr = F["atr"]
         ar = np.arange(n)
         bar_ok = (ar >= prep.first_idx) & np.isfinite(atr) & (atr > 0)
@@ -387,6 +424,11 @@ class Study:
                 if m.any():
                     groups.append(("xs_momentum", sd, xs_final.idx[m].astype(np.int64), xs_final.entry[m],
                                    xs_final.sl[m], False, None))
+        if DERIV_SIGNALS[0] in self.code:
+            for name, (Lm, Sm) in deriv_signals(prep, F, self.tf_ms).items():
+                for sd, mask in ((se.LONG, Lm), (se.SHORT, Sm)):
+                    idx = np.flatnonzero(mask & bar_ok)
+                    groups.append((name, sd, idx, s.c[idx], None, False, None))
         if RAW_SIGNALS[0] in self.code:
             for name, (Lm, Sm) in raw_signals(prep, F, is_btc).items():
                 for sd, mask in ((se.LONG, Lm), (se.SHORT, Sm)):
@@ -502,6 +544,9 @@ class Study:
             "hour": F["hour"][idx] if self.tf != "1d" else np.full(m, np.nan),
             "weekend": F["weekend"][idx],
             "score": E["score"],
+            "fund_side": F["fund"][idx] * sgn,
+            "fund_pct_side": np.where(sgn > 0, F["fund_pct"][idx], 100.0 - F["fund_pct"][idx]),
+            "oi_chg": F["oi_chg"][idx],
         }
         part = {
             "sig": E["sig"], "side": E["side"], "sym": np.full(m, self.sym_code.get(prep.symbol, -1), dtype=np.int16),

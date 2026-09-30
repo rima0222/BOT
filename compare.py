@@ -65,7 +65,7 @@ def main():
     ap.add_argument("--progress-file", type=str, default="")
     ap.add_argument("--baseline-file", type=str, default="")
     ap.add_argument("--offline", action="store_true", help="فقط از دیتای کش‌شده (بدون اینترنت)")
-    ap.add_argument("--signals", choices=["core", "patterns", "all"], default="core",
+    ap.add_argument("--signals", choices=["core", "patterns", "funding", "all"], default="core",
                     help="سنجش ورود: core = استراتژی‌ها و فرضیه‌ها، patterns = الگوهای کندلی و کلاسیک، all = همه")
     ap.add_argument("--resume", action="store_true",
                     help="ادامه‌ی یک سنجش ورود نیمه‌کاره با همون --job-id (از جایی که قطع شده)")
@@ -278,6 +278,26 @@ def run_entry_study(args, tfs, all_symbols, base_cfg, cache, prog, job_id, t0):
     def safe(sym):
         return sym.replace("/", "_").replace(":", "_")
 
+    # فاندینگ و اوپن اینترست (یک‌بار برای همه‌ی تایم‌فریم‌ها؛ روی دیسک کش می‌شه)
+    derivs, deriv_cov = {}, {}
+    if signal_set in ("funding", "all"):
+        import market_derivs
+        dc = market_derivs.DerivCache(config.DATA_CACHE_DIR, getattr(base_cfg, "DERIV_EXCHANGES", []),
+                                      log=lambda m: print("[derivs]", m, flush=True))
+        end_all = int(time.time() * 1000)
+        start_all = end_all - int(days_req) * 86_400_000 - 100 * 86_400_000   # + گرم‌کردن رتبه‌ی ۹۰ روزه
+        for j, sym in enumerate(all_symbols):
+            prog.update(f"دیتای فاندینگ و اوپن اینترست: {sym} ({j + 1}/{len(all_symbols)})",
+                        j / max(1, len(all_symbols)), 0.0, 0.02)
+            fa, fm = dc.ensure(sym, "funding", start_all, end_all, offline=args.offline)
+            oa, om = dc.ensure(sym, "oi", start_all, end_all, offline=args.offline)
+            derivs[sym] = {"funding": fa, "oi": oa}
+            deriv_cov[sym] = {"funding_exchange": (fm or {}).get("exchange"),
+                              "funding_cov_pct": market_derivs.coverage(fa, end_all - int(days_req) * 86_400_000,
+                                                                        end_all),
+                              "oi_exchange": (om or {}).get("exchange"),
+                              "oi_cov_pct": market_derivs.coverage(oa, end_all - int(days_req) * 86_400_000, end_all)}
+
     for i, tf in enumerate(tfs):
         lo, span = i / n_tf, 1.0 / n_tf
         label = tournament.TF_LABELS.get(tf, tf)
@@ -336,7 +356,7 @@ def run_entry_study(args, tfs, all_symbols, base_cfg, cache, prog, job_id, t0):
                 for j, sym in enumerate(todo):
                     if sym in preps:
                         study.add_symbol(preps[sym], variant, btc_ctx, xs.get(sym), is_btc=(sym == btc),
-                                         base_samples=base_n, keep_part=False)
+                                         base_samples=base_n, keep_part=False, deriv=derivs.get(sym))
                         es.save_symbol(sym_file(sym), sym, study.last_part, study._cur, meta.get(sym))
                     else:
                         es.save_symbol(sym_file(sym), sym, None, {}, meta.get(sym))
@@ -352,7 +372,7 @@ def run_entry_study(args, tfs, all_symbols, base_cfg, cache, prog, job_id, t0):
                     del data
                     if sym in p1:
                         study.add_symbol(p1[sym], variant, btc_ctx, None, is_btc=(sym == btc),
-                                         base_samples=base_n, keep_part=False)
+                                         base_samples=base_n, keep_part=False, deriv=derivs.get(sym))
                         es.save_symbol(sym_file(sym), sym, study.last_part, study._cur, m1.get(sym))
                     else:
                         es.save_symbol(sym_file(sym), sym, None, {}, m1.get(sym))
@@ -399,7 +419,7 @@ def run_entry_study(args, tfs, all_symbols, base_cfg, cache, prog, job_id, t0):
         "job_id": job_id, "days": days_req, "created_at": datetime.utcnow().isoformat(), "symbols": all_symbols,
         "total_elapsed_sec": round(time.time() - t0, 1), "bot_version": getattr(config, "BOT_VERSION", ""),
         "events_rows": rows_written, "runs": params["runs"], "started_at": params["created_at"],
-        "signal_set": signal_set,
+        "signal_set": signal_set, "deriv_coverage": deriv_cov,
         "fees": {"maker": base_cfg.MAKER_FEE_PCT, "taker": base_cfg.TAKER_FEE_PCT,
                  "slippage": base_cfg.TAKER_SLIPPAGE_PCT}})
     # فایل همه‌ی ورودها: یک سرتیتر + ورودهای هر تایم‌فریم (چند بخش gzip پشت‌سرهم = یک فایل gzip معتبر)

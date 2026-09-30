@@ -9,6 +9,7 @@
   6) خطای استاندارد خوشه‌ای == فرمول مرجع
   7) ذخیره‌ی مرحله‌ای روی دیسک + خوندن دوباره == اجرای یک‌جا (پایه‌ی «ادامه از جای قطع‌شده»)
   8) الگوهای کندلی/کلاسیک: شکل‌های ساخته‌شده‌ی دستی درست شناخته می‌شن + بدون نگاه به آینده
+  10) فاندینگ/OI: هم‌ترازی بدون نگاه به آینده + پیدا کردن مزیت کاشته‌شده (فاندینگ افراطی → برگشت)
   9) بک‌تست ساده‌ی حلقه‌ای مستقل (باز کردن پوزیشن روی هر الگو، حد ضرر خود الگو، RR2) == عدد سنجش؛
      حد ضرر همه‌ی الگوها سمت درست قیمت ورود
 اجرا:  python3 tests/test_entry_study.py
@@ -380,6 +381,65 @@ def test_naive_pattern_backtest():
     print(f"  ✓ {checked} معامله در ۶ الگو: وین‌ریت و سود هر معامله دقیقاً یکسان؛ هیچ حد ضرری سمت اشتباه نیست")
 
 
+def test_funding():
+    print("۱۰) فاندینگ و اوپن اینترست")
+    import market_derivs as md
+    H8 = 8 * 3_600_000
+    # هم‌ترازی: فقط رکوردهای تا بسته‌شدن کندل
+    rng = np.random.default_rng(4)
+    t0 = 1_600_000_000_000
+    fts = t0 + np.arange(600) * H8
+    fr = rng.normal(0.0001, 0.0003, 600)
+    close_ts = t0 + 900_000 + np.arange(19000) * 900_000
+    full = md.deriv_features(close_ts, {"funding": np.column_stack([fts, fr]), "oi": None})
+    cut = 300
+    part = md.deriv_features(close_ts, {"funding": np.column_stack([fts[:cut], fr[:cut]]), "oi": None})
+    m = close_ts < fts[cut]
+    same = np.array_equal(np.nan_to_num(full["fund"][m], nan=-9), np.nan_to_num(part["fund"][m], nan=-9)) and \
+        np.array_equal(np.nan_to_num(full["fund_pct"][m], nan=-9), np.nan_to_num(part["fund_pct"][m], nan=-9))
+    check(same, "فاندینگ: نگاه به آینده در هم‌ترازی")
+    # مزیت کاشته‌شده: بعد از فاندینگ خیلی منفی، قیمت ۴۸ کندل رو به بالا
+    cfg = make_cfg(HTF_TIMEFRAMES=["1h", "4h"], ENTRY_STUDY_HORIZON={"15m": 48})
+    arrs, derivs = {}, {}
+    for i in range(8):
+        r2 = np.random.default_rng(600 + i)
+        n = 9000
+        f = r2.normal(0.0001, 0.0002, n // 32 + 2)
+        f[r2.random(len(f)) < 0.04] = -0.003          # فاندینگ خیلی منفی گاه‌به‌گاه
+        fts2 = t0 + np.arange(len(f)) * H8
+        rets = r2.normal(0, 0.004, n)
+        bar_ts = t0 + np.arange(n) * 900_000
+        for k in np.flatnonzero(f < -0.002):
+            b = int(np.searchsorted(bar_ts + 900_000, fts2[k]))
+            rets[b + 1:b + 49] += 0.0012
+        close = 20 * np.exp(np.cumsum(rets))
+        open_ = np.r_[20, close[:-1]]
+        wick = np.abs(r2.normal(0, 0.0025, (n, 2))) * close[:, None]
+        arrs[f"F{i}/USDT"] = np.column_stack([bar_ts, open_, np.maximum(open_, close) + wick[:, 0],
+                                              np.minimum(open_, close) - wick[:, 1], close, r2.lognormal(10, .4, n)])
+        derivs[f"F{i}/USDT"] = {"funding": np.column_stack([fts2, f]), "oi": None}
+    syms = list(arrs)
+    start = int(arrs[syms[0]][400, 0])
+    split = int(start + (int(arrs[syms[0]][-1, 0]) - start) * 0.7)
+    st = es.Study(cfg, "15m", split, syms, signal_set="funding")
+    v = fast_backtest.variant_from_cfg(cfg)
+    for sym in syms:
+        a = arrs[sym]
+        htf = {"1h": fast_backtest._resample(a, "15m", "1h"), "4h": fast_backtest._resample(a, "15m", "4h")}
+        p = fast_backtest.prepare_symbol(sym, a, htf, None, start, cfg, keep_volume=True)
+        st.add_symbol(p, v, None, None, deriv=derivs[sym])
+    st.finish()
+    rows = es.analyze(st)
+    r = [x for x in rows if x["signal"] == "fund_contra" and x["side"] == "long"]
+    ok = r and r[0]["verdict"] in ("robust", "edge_weak_oos", "edge_costs")
+    others = [x for x in rows if x["signal"] == "fund_contra" and x["side"] == "short"]
+    check(bool(ok), f"مزیت کاشته‌شده‌ی فاندینگ پیدا نشد: {[(x['side'], x.get('verdict')) for x in rows if x['signal'] == 'fund_contra']}")
+    if r:
+        print(f"  ✓ هم‌ترازی بدون نگاه به آینده؛ فاندینگ افراطی (خرید): +1R/−1R آموزش {r[0]['is']['p'][0] * 100:.1f}٪ "
+              f"(پایه {r[0]['is']['base_p'][0] * 100:.1f}٪) — {r[0]['verdict_text']}؛ فروش (بدون مزیت کاشته): "
+              f"{others[0]['verdict_text'] if others else '—'}")
+
+
 if __name__ == "__main__":
     t0 = time.time()
     test_path_brute()
@@ -390,6 +450,7 @@ if __name__ == "__main__":
     test_checkpoint_roundtrip()
     test_patterns()
     test_naive_pattern_backtest()
+    test_funding()
     print()
     if FAILS:
         print(f"❌ {len(FAILS)} خطا")
