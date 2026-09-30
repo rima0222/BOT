@@ -27,7 +27,7 @@ import market_data
 import money
 
 STRATEGY_NAMES = ["weighted_confluence", "box_breakout", "box_breakout@retest", "trend_follow", "fib_phase",
-                  "pattern_structure", "pattern_structure@free"]
+                  "pattern_structure", "pattern_structure@free", "contrarian_btc", "contrarian_btc@any"]
 LONG, SHORT = 1, -1
 
 
@@ -227,7 +227,37 @@ def compute_structural(series, cfg, first_idx=0):
         out["fib_phase"] = _structural_fib(series, cfg, ctx, W)
     if any(nm.startswith("pattern_structure") for nm in names):
         out.update(_structural_pattern(series, cfg, ctx))
+    if any(nm.startswith("contrarian_btc") for nm in names):
+        out.update(_structural_contrarian(series, cfg, ctx))
     return out
+
+
+def _structural_contrarian(series, cfg, ctx):
+    """
+    معادل strategies.generate_contrarian_btc (الگوهای برگشتی، بدون فیلتر ساختار، حداقل حد ضرر CONTRA_MIN_SL_ATR).
+    شرط «خلاف روند BTC» اینجا نیست — مثل ربات زنده، بعد از سیگنال در sim_engine.run_portfolio روی کلید
+    «contrarian_btc» اعمال می‌شه. «contrarian_btc@any» همون سیگنال‌ها بدون این شرط (کنترل آزمایش).
+    """
+    import patterns
+    import strategies
+    c = series.c
+    atr, in_range, trend = ctx["atr"], ctx["in_range"], ctx["trend"]
+    names = patterns.pattern_names("reversal")
+    sig = patterns.pattern_signals(series.o, series.h, series.l, c, atr, int(cfg.SWING_ORDER), names)
+    base = in_range & ctx["atr_ok"] & (ctx["wlen"] >= 50)
+    pcfg = strategies._ContraPatCfg(cfg)
+    pair = []
+    for side, arr_i in (("LONG", 1), ("SHORT", 3)):
+        idx_l, sl_l = [], []
+        for t in np.flatnonzero(base & (sig[arr_i] >= 0)).tolist():
+            st = strategies.pattern_setup(side, c, atr, int(trend[t]), t, sig, pcfg)
+            if st is not None:
+                idx_l.append(t)
+                sl_l.append(st[0])
+        idx = np.array(idx_l, dtype=np.int64)
+        pair.append(Structural(idx, np.array(sl_l, dtype=np.float64), np.full(len(idx), np.nan), atr[idx],
+                               False, np.full(len(idx), np.nan), use_score=False))
+    return {"contrarian_btc": tuple(pair), "contrarian_btc@any": tuple(pair)}
 
 
 def _structural_pattern(series, cfg, ctx):

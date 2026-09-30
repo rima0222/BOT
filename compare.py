@@ -14,7 +14,7 @@ import sys
 import time
 import traceback
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -59,8 +59,10 @@ def main():
     ap.add_argument("--symbols", type=str, default="", help="لیست نماد با کاما (به‌جای --top)")
     ap.add_argument("--timeframes", type=str, default="15m,1h,4h",
                     help="تایم‌فریم‌ها با کاما: 1m,5m (اسکلپ) 15m,1h,4h (نوسان‌گیری)")
-    ap.add_argument("--grid", choices=["quick", "full", "focus", "all", "fib", "pattern"], default="quick",
+    ap.add_argument("--grid", choices=["quick", "full", "focus", "all", "fib", "pattern", "contrarian"], default="quick",
                     help="focus = فقط استراتژی شکست باکس و گزینه‌های جدیدش (سریع)")
+    ap.add_argument("--end", type=str, default="",
+                    help="تاریخ پایان بازه (YYYY-MM-DD، UTC) — برای تست روی گذشته؛ خالی = الان")
     ap.add_argument("--job-id", type=str, default="")
     ap.add_argument("--progress-file", type=str, default="")
     ap.add_argument("--baseline-file", type=str, default="")
@@ -78,7 +80,10 @@ def main():
     job_id = args.job_id or uuid.uuid4().hex[:10]
     os.makedirs(config.REPORTS_DIR, exist_ok=True)
     tfs = [t.strip() for t in args.timeframes.split(",") if t.strip() in config.TIMEFRAME_PROFILES] or ["15m"]
-    params = {"days": args.days, "top": args.top, "grid": args.grid, "timeframes": tfs}
+    end_ms = None
+    if args.end:
+        end_ms = int(datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
+    params = {"days": args.days, "top": args.top, "grid": args.grid, "timeframes": tfs, "end": args.end or None}
     prog = Progress(args.progress_file, job_id, params)
     if args.entry_study:
         prog.state["kind"] = "entry"
@@ -128,7 +133,7 @@ def main():
             label = tournament.TF_LABELS.get(tf, tf)
             plan, data = fast_backtest.load_market_data(
                 cache, symbols, days, cfg, lambda m, f: prog.update(f"{label} — {m}", f, lo, lo + span * 0.4),
-                offline=args.offline)
+                offline=args.offline, now_ms=end_ms)
             preps, meta = fast_backtest.prepare_all(plan, data, symbols, cfg,
                                                     lambda m, f: prog.update(f"{label} — {m}", f, lo + span * 0.4,
                                                                              lo + span * 0.5))
@@ -154,7 +159,7 @@ def main():
         csv_path = os.path.join(config.REPORTS_DIR, f"results_{job_id}.csv")
         tournament.write_results_csv(all_results, csv_path)
         report["meta"].update({
-            "job_id": job_id, "days": args.days, "created_at": datetime.utcnow().isoformat(),
+            "job_id": job_id, "days": args.days, "created_at": datetime.utcnow().isoformat(), "end": args.end or None,
             "symbols": all_symbols, "total_elapsed_sec": round(time.time() - t0, 1),
             "cache_mb": cache.disk_usage_mb(), "results_csv": os.path.basename(csv_path),
             "fees": {"maker": base_cfg.MAKER_FEE_PCT, "taker": base_cfg.TAKER_FEE_PCT,

@@ -44,6 +44,28 @@ conn = paper_trader.get_conn(config.DB_PATH)
 
 
 
+def _apply_live_defaults_v18():
+    """
+    یک‌بار (اولین اجرای نسخه‌ی ۱۸): ربات زنده با استراتژی شخصی «خلاف جمعیت دیررس» و تنظیماتش
+    (config.CONTRA_LIVE_DEFAULTS) + پاک کردن همه‌ی معاملات/لاگ‌های قبلی تا پنل از صفر شروع کنه.
+    """
+    if paper_trader.get_setting(conn, "defaults_v18", None) is not None:
+        return
+    for k, v in config.CONTRA_LIVE_DEFAULTS.items():
+        paper_trader.set_setting(conn, k, v)
+    for k in ("defaults_v14", "defaults_v16"):
+        paper_trader.set_setting(conn, k, "1")
+    try:
+        cap = float(paper_trader.get_setting(conn, "initial_capital", config.VIRTUAL_BALANCE_START))
+    except (TypeError, ValueError):
+        cap = float(config.VIRTUAL_BALANCE_START)
+    paper_trader.wipe_history(conn, cap)
+    latest_analysis.clear()
+    paper_trader.set_setting(conn, "defaults_v18", "1")
+    log.info(f"[نسخه‌ی ۱۸] استراتژی شخصی «خلاف جمعیت» پیش‌فرض شد و تاریخچه پاک شد (سرمایه {cap}): "
+             f"{config.CONTRA_LIVE_DEFAULTS}")
+
+
 def _apply_live_defaults_v16():
     """یک‌بار: ربات زنده با «الگو + ساختار بازار» و تنظیمات پیش‌فرضش (config.PAT_LIVE_DEFAULTS)."""
     if paper_trader.get_setting(conn, "defaults_v16", None) is not None:
@@ -197,6 +219,7 @@ def get_bot_settings():
         "cut_loss_r": cut_loss_r,
         "pat_structure": paper_trader.get_setting(conn, "pat_structure", config.PAT_STRUCTURE)
         if paper_trader.get_setting(conn, "pat_structure", config.PAT_STRUCTURE) in ("with", "off") else "with",
+        "contra_btc": "off" if paper_trader.get_setting(conn, "contra_btc", config.CONTRA_BTC) == "off" else "against",
     }
 
 
@@ -204,9 +227,11 @@ def live_config_snapshot(settings=None):
     """تنظیمات فعلی ربات زنده به همون فرمتی که «مقایسه‌ی استراتژی‌ها» می‌فهمه."""
     st = settings or get_bot_settings()
     return {"timeframe": st["timeframe"], "active_strategies": st["active_strategies"],
-            "combine_mode": st["combine_mode"], "min_score": st["min_score"], "free": st["pat_structure"] == "off",
+            "combine_mode": st["combine_mode"], "min_score": st["min_score"],
+            "free": (st["contra_btc"] == "off") if "contrarian_btc" in st["active_strategies"]
+            else st["pat_structure"] == "off",
             "trail_profile": st["trail_profile"], "retest": st["retest"], "early_exit": st["early_exit"],
-            "daily_loss": st["daily_loss"] > 0, "cut_loss_r": st["cut_loss_r"],
+            "daily_loss": st["daily_loss"] > 0, "cut_loss_r": st["cut_loss_r"], "cut": st["cut_loss_r"],
             "strictness": st["strictness"], "trailing": st["trail_profile"] if st["trailing_enabled"] else False,
             "min_sl": st["min_sl"],
             "room": st["room"], "btc_filter": st["btc_filter"], "long_only": st["long_only"], "htf": st["htf"]}
@@ -263,6 +288,7 @@ def get_effective_cfg(settings):
         "DAILY_LOSS_LIMIT_USD": settings["daily_loss"],
         "CUT_LOSS_R": settings["cut_loss_r"],
         "PAT_STRUCTURE": settings.get("pat_structure", config.PAT_STRUCTURE),
+        "CONTRA_BTC": settings.get("contra_btc", config.CONTRA_BTC),
     }
     # پروفایل تایم‌فریم انتخاب‌شده (تایم‌فریم‌های تایید، کول‌داون، حد زمانی، ...)
     cfg = fast_backtest.profile_cfg(config, settings["timeframe"])
@@ -442,7 +468,12 @@ def scan_symbol(symbol, settings, xs_picks=None):
     if sig["side"] == "SHORT" and settings["long_only"]:
         reject("side_disabled")
         return
-    if settings["btc_filter"]:
+    if strategy_name == strategies.CONTRA_KEY and getattr(cfg, "CONTRA_BTC", "against") != "off":
+        # استراتژی شخصی: فقط خلاف روند داو BTC (همون قانون موتور بک‌تست)
+        if not strategies.contra_btc_allows(sig["side"], get_btc_regime(cfg)):
+            reject("btc_regime")
+            return
+    elif settings["btc_filter"]:
         btc_trend = get_btc_regime(cfg)
         if (sig["side"] == "LONG" and btc_trend == "downtrend") or (sig["side"] == "SHORT" and btc_trend == "uptrend"):
             reject("btc_regime")
@@ -697,6 +728,11 @@ def api_data():
         "strategy": settings["strategy"],
         "pat_structure": settings["pat_structure"],
         "pat_info": {"count": len(__import__("patterns").pattern_names(config.PAT_SET)), "min_sl": config.PAT_MIN_SL_ATR},
+        "contra_info": {"count": len(__import__("patterns").pattern_names("reversal")),
+                        "min_sl": config.CONTRA_MIN_SL_ATR,
+                        "btc_tf": {"1w": "هفتگی", "1d": "روزانه", "4h": "۴ ساعته", "1h": "۱ ساعته"}.get(
+                            config.PROFILE_BTC_TIMEFRAME.get(settings["timeframe"], "4h"),
+                            config.PROFILE_BTC_TIMEFRAME.get(settings["timeframe"], "4h"))},
         "fib_info": {"impulse": config.FIB_MIN_IMPULSE_ATR, "zone": f"{config.FIB_ZONE_LO:g} تا {config.FIB_ZONE_HI:g}",
                      "vp": config.FIB_VP_BARS},
         "strategy_labels": {**{k: v["short"] for k, v in strategies.STRATEGY_REGISTRY.items()},
@@ -912,6 +948,24 @@ def api_reset_capital():
     return jsonify({"ok": True, "settings": get_bot_settings()})
 
 
+@app.route("/api/reset_all", methods=["POST"])
+def api_reset_all():
+    """شروع از صفر: پاک کردن همه‌ی معاملات (حتی بازها)، لاگ سیگنال‌ها و منحنی موجودی. تنظیمات می‌مونن."""
+    body = request.get_json(force=True, silent=True) or {}
+    if body.get("confirm") != "RESET":
+        return jsonify({"ok": False, "error": "تایید لازمه"}), 400
+    try:
+        amount = float(body.get("amount") or get_bot_settings()["initial_capital"])
+        if amount <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "مقدار سرمایه نامعتبر است"}), 400
+    paper_trader.wipe_history(conn, amount)
+    latest_analysis.clear()
+    log.info(f"[شروع از صفر از پنل] همه‌ی معاملات و لاگ‌ها پاک شد؛ سرمایه {amount}")
+    return jsonify({"ok": True, "settings": get_bot_settings()})
+
+
 @app.route("/api/close_trade", methods=["POST"])
 def api_close_trade():
     """بستن دستی یک پوزیشن باز از پنل، با قیمت لحظه‌ای فعلی."""
@@ -1072,6 +1126,11 @@ def api_backtest_start():
         overrides["WC_MIN_SCORE_PCT"] = float(body["min_score"])
     strat = body.get("strategy") or get_bot_settings()["strategy"]
     overrides["ACTIVE_STRATEGIES"] = strategies.parse_strategy(strat)
+    _live = get_bot_settings()
+    overrides["PAT_STRUCTURE"] = body.get("pat_structure") if body.get("pat_structure") in ("with", "off") \
+        else _live["pat_structure"]
+    overrides["CONTRA_BTC"] = body.get("contra_btc") if body.get("contra_btc") in ("against", "off") \
+        else _live["contra_btc"]
     if body.get("cut_loss_r") is not None:
         try:
             overrides["CUT_LOSS_R"] = max(0.0, min(0.99, float(body["cut_loss_r"])))
@@ -1264,9 +1323,11 @@ def _safe_job_id(job_id):
 @app.route("/api/compare/start", methods=["POST"])
 def api_compare_start():
     body = request.get_json(force=True, silent=True) or {}
-    days = max(60, min(int(body.get("days", 365)), 1095))
+    days = max(60, min(int(body.get("days_override") or body.get("days", 365)), 1095))
     top_n = max(3, min(int(body.get("top_n", 20)), 60))
-    grid = body.get("grid") if body.get("grid") in ("full", "focus", "all", "fib", "pattern") else "quick"
+    grid = body.get("grid") if body.get("grid") in ("full", "focus", "all", "fib", "pattern", "contrarian") \
+        else "quick"
+    unseen = bool(body.get("unseen"))
     tfs = [t for t in (body.get("timeframes") or ["15m", "1h", "4h"]) if t in config.TIMEFRAME_PROFILES]
     if not tfs:
         return jsonify({"ok": False, "error": "حداقل یک تایم‌فریم انتخاب کن"}), 400
@@ -1277,6 +1338,9 @@ def api_compare_start():
         if backtest_running_job["id"] is not None:
             return jsonify({"ok": False, "error": "یک بک‌تست تکی در حال اجراست؛ صبر کن تمام بشه."}), 409
         symbols = active_symbols["list"][:top_n] if active_symbols["list"] else list(config.SYMBOLS)[:top_n]
+        if unseen:
+            # گذشته‌ی دیده‌نشده: ارزهای قدیمی، بازه‌ی ثابت که به UNSEEN_END ختم می‌شه (فقط روزانه)
+            symbols, days, tfs = list(config.UNSEEN_SYMBOLS), int(config.UNSEEN_DAYS), ["1d"]
         job_id = uuid.uuid4().hex[:10]
         baseline_path = os.path.join(_reports_dir(), f"baseline_{job_id}.json")
         live_conf = live_config_snapshot()
@@ -1294,6 +1358,8 @@ def api_compare_start():
                "--days", str(days), "--grid", grid, "--job-id", job_id, "--timeframes", ",".join(tfs),
                "--progress-file", _progress_path(job_id), "--baseline-file", baseline_path,
                "--symbols", ",".join(symbols)]
+        if unseen:
+            cmd += ["--end", config.UNSEEN_END]
         _spawn_compare(cmd, job_id)
     log.info(f"[مقایسه‌ی استراتژی‌ها] شروع شد: {job_id} ({days} روز، {len(symbols)} نماد، {grid}، {tfs})")
     return jsonify({"ok": True, "job_id": job_id})
@@ -1494,12 +1560,16 @@ def api_compare_apply():
     act = [a for a in (c.get("active_strategies") or []) if a in strategies.STRATEGY_REGISTRY]
     if act:
         paper_trader.set_setting(conn, "strategy", "+".join(act))
-    if c.get("cut_loss_r") is not None:
-        paper_trader.set_setting(conn, "cut_loss_r", float(c["cut_loss_r"]))
+    cut = c.get("cut", c.get("cut_loss_r"))
+    if cut is not None:
+        paper_trader.set_setting(conn, "cut_loss_r", float(cut))
     if "retest" in c:
         paper_trader.set_setting(conn, "brk_retest", "1" if c["retest"] else "0")
     if "free" in c:
-        paper_trader.set_setting(conn, "pat_structure", "off" if c["free"] else "with")
+        if "contrarian_btc" in act:
+            paper_trader.set_setting(conn, "contra_btc", "off" if c["free"] else "against")
+        else:
+            paper_trader.set_setting(conn, "pat_structure", "off" if c["free"] else "with")
     if "early_exit" in c:
         paper_trader.set_setting(conn, "early_exit", "1" if c["early_exit"] else "0")
     if "daily_loss" in c:
@@ -1832,6 +1902,7 @@ def api_data_cache():
 if __name__ == "__main__":
     _apply_live_defaults_v14()
     _apply_live_defaults_v16()
+    _apply_live_defaults_v18()
     scheduler.start()
     threading.Thread(target=_auto_resume_entry, daemon=True).start()
     log.info("ربات معامله‌گر مجازی استارت شد.")

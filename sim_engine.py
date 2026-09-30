@@ -364,9 +364,14 @@ def run_portfolio(merged, preps, symbol_order, P, record=False):
         reason[(side_arr == se.LONG) & (reason == 0)] = 1
     if not P.allow_short:
         reason[(side_arr == se.SHORT) & (reason == 0)] = 1
+    # استراتژی شخصی «خلاف جمعیت»: فقط خلاف روند BTC (همون قانون strategies.contra_btc_allows در ربات زنده)
+    contra = np.array([lb == "contrarian_btc" for lb in merged["label"]], dtype=bool)
+    if contra.any():
+        ok = ((side_arr == se.LONG) & (btc == -1)) | ((side_arr == se.SHORT) & (btc == 1))
+        reason[contra & ~ok & (reason == 0)] = 2
     if P.btc_filter:
-        reason[(side_arr == se.LONG) & (btc == -1) & (reason == 0)] = 2
-        reason[(side_arr == se.SHORT) & (btc == 1) & (reason == 0)] = 2
+        reason[(side_arr == se.LONG) & (btc == -1) & ~contra & (reason == 0)] = 2
+        reason[(side_arr == se.SHORT) & (btc == 1) & ~contra & (reason == 0)] = 2
     if P.use_htf:
         if P.htf_weighted:
             bad_l = (side_arr == se.LONG) & (merged["htf_wl"] < P.htf_min_long_pct - 1e-9)
@@ -532,7 +537,7 @@ def run_portfolio(merged, preps, symbol_order, P, record=False):
             "funding": funding, "exit_type": exit_type, "rr": float(rrs[j]), "score": round(float(scores[j]), 1),
             "htf_agree": htf_agree if P.use_htf else None,
             "R": pnl / risk_usd if risk_usd > 0 else 0.0, "peak": float(peak), "bars": int(exit_i - t),
-            "mae_r": mae_r, "entry_fee_frac": fi,
+            "mae_r": mae_r, "entry_fee_frac": fi, "sig_idx": int(t_idx[j]),
         })
         if record:
             sig["opened"] = 1

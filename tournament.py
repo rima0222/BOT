@@ -26,7 +26,7 @@ import sim_engine
 STRATEGIES = ["box_breakout", "weighted_confluence"]
 STRATEGY_LABELS = {"box_breakout": "شکست باکس", "weighted_confluence": "ترکیبی وزن‌دار", "trend_follow": "روندگیر",
                    "xs_momentum": "مومنتوم هفتگی", "fib_phase": "فیبوناچی حرکت دوم",
-                   "pattern_structure": "الگو + ساختار بازار"}
+                   "pattern_structure": "الگو + ساختار بازار", "contrarian_btc": "⭐ خلاف جمعیت (شخصی)"}
 TRAIL_FA = {"strict": "تریلینگ سخت‌گیر", "tight": "تریلینگ حساس", "balanced": "تریلینگ متعادل", "loose": "تریلینگ پلکانی"}
 TF_LABELS = {"1m": "۱ دقیقه (اسکلپ)", "5m": "۵ دقیقه (اسکلپ)", "15m": "۱۵ دقیقه", "1h": "۱ ساعته", "4h": "۴ ساعته",
              "1d": "روزانه"}
@@ -73,6 +73,8 @@ def describe(conf):
         parts.append("ورود با پولبک" if conf.get("retest") else "ورود روی شکست")
     if "pattern_structure" in acts:
         parts.append("بدون فیلتر ساختار داو" if conf.get("free") else "هم‌جهت ساختار داو (HH/HL، LH/LL)")
+    if "contrarian_btc" in acts:
+        parts.append("بدون شرط BTC (کنترل)" if conf.get("free") else "فقط خلاف روند BTC")
     if conf.get("cut"):
         parts.append(f"بستن در ‎-{conf['cut']:g}R")
     if conf.get("early_exit"):
@@ -141,6 +143,8 @@ def _engine_active(conf):
             out.append("box_breakout@retest")
         elif st == "pattern_structure" and conf.get("free"):
             out.append("pattern_structure@free")
+        elif st == "contrarian_btc" and conf.get("free"):
+            out.append("contrarian_btc@any")
         else:
             out.append(st)
     return out
@@ -260,6 +264,14 @@ def run_timeframe(preps, symbols, cfg, tf, start_ms, end_ms, grid="quick", progr
                                   (False, 0.5), ("balanced", 0.5)):
                 cf = _conf(tf, "pattern_structure", None, "normal", False, trailing, False, False, False, False,
                            False, False, True, cut)
+                cf["free"] = free
+                confs.append(cf)
+    elif grid == "contrarian":
+        # استراتژی شخصی «خلاف جمعیت»: با/بدون شرط خلاف روند BTC × مدیریت (پیش‌فرض = تریلینگ سخت‌گیر + بستن در ‎-0.5R)
+        for free in (False, True):
+            for trailing, cut in (("strict", 0.5), ("strict", 0.0), (False, 0.0), (False, 0.5), ("balanced", 0.5)):
+                cf = _conf(tf, "contrarian_btc", None, "normal", False, trailing, False, False, False, False,
+                           False, False, False, cut)
                 cf["free"] = free
                 confs.append(cf)
     elif grid == "fib":
@@ -418,7 +430,7 @@ def _paired_effects(results):
             ("early_exit", "خروج زودهنگام (اگه تا چند کندل جلو نرفت)"),
             ("daily_loss", "حد ضرر روزانه"),
             ("cut", "بستن زودتر در ضرر (‎-0.5R / ‎-0.6R) در برابر حد ضرر کامل"),
-            ("free", "الگو بدون فیلتر ساختار داو (در برابر فقط هم‌جهت ساختار)")]
+            ("free", "بدون فیلتر (الگو: ساختار داو / خلاف جمعیت: شرط BTC) در برابر با فیلتر")]
 
     def summarize(dim, label, pairs):
         d = [a["full"]["avg_r"] - b["full"]["avg_r"] for a, b in pairs]

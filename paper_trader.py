@@ -143,6 +143,21 @@ def reset_capital(conn, amount, as_of=None):
     set_setting(conn, "capital_reset_time", _now(as_of).isoformat())
 
 
+def wipe_history(conn, amount, as_of=None):
+    """
+    شروع از صفر: همه‌ی معاملات (باز و بسته)، منحنی موجودی، لاگ سیگنال‌ها و قیمت‌های ثبت‌شده پاک می‌شن و
+    موجودی به سرمایه‌ی اولیه برمی‌گرده. تنظیمات پنل دست نمی‌خورن. برگشت‌ناپذیره.
+    """
+    for table in ("trades", "equity", "signal_log", "price_snapshots"):
+        conn.execute(f"DELETE FROM {table}")
+    try:
+        conn.execute("DELETE FROM sqlite_sequence WHERE name IN ('trades','equity','signal_log','price_snapshots')")
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
+    reset_capital(conn, amount, as_of=as_of)
+
+
 # ==================== وضعیت پوزیشن‌ها ====================
 
 def get_open_symbols(conn):

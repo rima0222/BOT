@@ -515,10 +515,9 @@ def pattern_setup(side, c, atr, trend, t, sig, cfg):
     return stop, int(nm[t])
 
 
-def generate_pattern_structure(df, cfg):
-    """الگوی کندلی/کلاسیک + ساختار بازار داو، روی آخرین کندل بسته‌شده‌ی پنجره."""
+def _pattern_strategy(df, cfg, name, pset, pcfg, extra_reason):
+    """بدنه‌ی مشترک استراتژی‌های الگومحور روی آخرین کندل بسته‌شده‌ی پنجره."""
     import patterns
-    name = "pattern_structure"
     price = float(df["close"].iloc[-1])
     res = {"trend": "sideways", "price": price, "support": None, "resistance": None, "atr": None,
            "signal": None, "strategy": name}
@@ -537,20 +536,52 @@ def generate_pattern_structure(df, cfg):
     h = df["high"].values.astype(float)
     l = df["low"].values.astype(float)
     c = df["close"].values.astype(float)
-    names = patterns.pattern_names(getattr(cfg, "PAT_SET", "all"))
+    names = patterns.pattern_names(pset)
     sig = patterns.pattern_signals(o, h, l, c, atr_s, int(cfg.SWING_ORDER), names)
     tr = {"uptrend": 1, "downtrend": -1}.get(trend, 0)
     for side in ("LONG", "SHORT"):
-        st = pattern_setup(side, c, atr_s, tr, n - 1, sig, cfg)
+        st = pattern_setup(side, c, atr_s, tr, n - 1, sig, pcfg)
         if st is None:
             continue
         out = analysis.finalize_signal(side, price, st[0], None, float(atr_s[-1]), cfg, tp_uses_level=False)
         if out:
-            out.update({"score": None, "reasons": ["pattern:" + names[st[1]], "structure"],
+            out.update({"score": None, "reasons": ["pattern:" + names[st[1]], extra_reason],
                         "pattern": patterns.label(names[st[1]])})
             res["signal"] = out
             return res
     return res
+
+
+def generate_pattern_structure(df, cfg):
+    """الگوی کندلی/کلاسیک + ساختار بازار داو، روی آخرین کندل بسته‌شده‌ی پنجره."""
+    return _pattern_strategy(df, cfg, "pattern_structure", getattr(cfg, "PAT_SET", "all"), cfg, "structure")
+
+
+# ==================== استراتژی شخصی: «خلاف جمعیت دیررس» (contrarian_btc) ====================
+# ایده (از نتایج سنجش ورود روی دیتای واقعی): روی روزانه، وقتی روند هفتگی بیت‌کوین نزولیه، الگوی برگشتی
+# صعودی روی آلت‌ها (و برعکس) بیشتر از شانس جواب داده — یعنی ورود خلاف جمعیتی که دیر وارد روند شده.
+# ۱) جهت: فقط خلاف روند داو هفتگی BTC (BTC نزولی → فقط خرید، BTC صعودی → فقط فروش، BTC خنثی → هیچ).
+#    این شرط در ربات زنده (bot.scan_symbol) و موتور بک‌تست (sim_engine.run_portfolio) با یک قانون اعمال می‌شه.
+# ۲) ماشه: یکی از الگوهای برگشتی کلاسیک (patterns.REVERSAL_PATTERNS) روی کندل بسته‌شده.
+# ۳) حد ضرر: حد ضرر خود الگو، ولی حداقل CONTRA_MIN_SL_ATR × ATR. حد سود RR2؛ مدیریت با تریلینگ و بستن در ‎-0.5R.
+CONTRA_KEY = "contrarian_btc"
+
+
+class _ContraPatCfg:
+    PAT_STRUCTURE = "off"
+
+    def __init__(self, cfg):
+        self.PAT_MIN_SL_ATR = float(getattr(cfg, "CONTRA_MIN_SL_ATR", 1.0))
+
+
+def contra_btc_allows(side, btc_trend):
+    """شرط جهت نسبت به روند BTC (مشترک ربات زنده و موتور). btc_trend: 1 / -1 / 0 یا uptrend/downtrend/..."""
+    b = {"uptrend": 1, "downtrend": -1}.get(btc_trend, btc_trend if btc_trend in (1, -1) else 0)
+    return (side == "LONG" and b == -1) or (side == "SHORT" and b == 1)
+
+
+def generate_contrarian_btc(df, cfg):
+    return _pattern_strategy(df, cfg, CONTRA_KEY, "reversal", _ContraPatCfg(cfg), "contra_btc")
 
 
 # ==================== مومنتوم نسبی هفتگی (cross-sectional momentum) ====================
@@ -639,6 +670,11 @@ STRATEGY_REGISTRY = {
         "label": "الگو + ساختار بازار: الگوی کندلی/کلاسیک هم‌جهت با سقف و کف‌های داو (HH/HL، LH/LL)، RR2 + تریلینگ",
         "short": "الگو + ساختار بازار",
     },
+    "contrarian_btc": {
+        "fn": generate_contrarian_btc,
+        "label": "⭐ استراتژی شخصی «خلاف جمعیت دیررس»: الگوی برگشتی خلاف روند هفتگی بیت‌کوین (روزانه)، RR2 + تریلینگ سخت‌گیر + بستن در ‎-0.5R",
+        "short": "⭐ خلاف جمعیت (شخصی)",
+    },
     "xs_momentum": {
         "fn": _xs_placeholder,
         "label": "مومنتوم نسبی هفتگی: خرید قوی‌ترین‌ها، فروش ضعیف‌ترین‌ها (فقط روزانه)",
@@ -676,6 +712,8 @@ def engine_key(name, cfg):
         return "box_breakout@retest"
     if name == "pattern_structure" and getattr(cfg, "PAT_STRUCTURE", "with") == "off":
         return "pattern_structure@free"
+    if name == CONTRA_KEY and getattr(cfg, "CONTRA_BTC", "against") == "off":
+        return CONTRA_KEY + "@any"
     return name
 
 
@@ -694,6 +732,9 @@ def reason_labels(reasons):
             continue
         if rs == "structure":
             out.append("ساختار داو هم‌جهت")
+            continue
+        if rs == "contra_btc":
+            out.append("خلاف روند هفتگی بیت‌کوین")
             continue
         out.append(COMPONENT_LABELS.get(r) or BREAKOUT_LABELS.get(r) or FIB_LABELS.get(rs[4:]) or r)
     return out

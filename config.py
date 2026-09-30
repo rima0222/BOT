@@ -30,7 +30,7 @@ STABLECOIN_BASES = [
 
 # --- صرافی برای دریافت دیتای رایگان (بدون نیاز به API Key) ---
 # ترتیب امتحان: اول بایننس، اگه در دسترس نبود کوکوین، بعد اوکی‌اکس
-BOT_VERSION = "17"   # نسخه‌ی ربات (توی پنل و فایل بک‌تست نمایش داده می‌شه)
+BOT_VERSION = "18"   # نسخه‌ی ربات (توی پنل و فایل بک‌تست نمایش داده می‌شه)
 EXCHANGE_TRY_ORDER = ["binance", "kucoin", "okx"]
 
 # --- تایم‌فریم اصلی برای تولید سیگنال ورود ---
@@ -174,7 +174,7 @@ MIN_NOTIONAL_USD = 5.0       # اگه سرمایه‌ی در دسترس برای
 #   rsi   : مومنتوم RSI — خرید بین ۵۰ و ۷۵، فروش بین ۲۵ و ۵۰
 #   cycle : فاز بازار (سایکل داو): میانگین ۹۹ رو به بالا + حجم رو به افزایش = فاز رشد (مشارکت
 #           عمومی) برای خرید؛ میانگین ۹۹ رو به پایین + حجم رو به افزایش = فاز ریزش برای فروش
-ACTIVE_STRATEGIES = ["fib_phase"]     # استراتژی پیش‌فرض (از پنل قابل تغییر)
+ACTIVE_STRATEGIES = ["contrarian_btc"]     # استراتژی پیش‌فرض (از پنل قابل تغییر)
 STRATEGY_COMBINE_MODE = "any"
 CONFIRM_LOOKBACK_BARS = 8
 WC_WEIGHTS = {"dow": 2.0, "sr": 2.0, "sma": 2.0, "rsi": 1.5, "cycle": 1.5}
@@ -293,6 +293,26 @@ PAT_MIN_SL_ATR = 0.5
 PAT_LIVE_DEFAULTS = {"strategy": "pattern_structure", "timeframe": "4h", "min_score": 0.0, "trailing_enabled": "1",
                      "trail_profile": "balanced", "cut_loss_r": 0.0, "htf_enabled": "0", "early_exit": "0"}
 
+# ==================== استراتژی ۷ (شخصی): خلاف جمعیت دیررس (contrarian_btc) ====================
+# روزانه؛ جهت فقط خلاف روند داو هفتگی بیت‌کوین؛ ماشه = الگوی برگشتی کلاسیک (patterns.REVERSAL_PATTERNS)؛
+# حد ضرر = حد ضرر الگو ولی حداقل CONTRA_MIN_SL_ATR × ATR؛ RR2 + تریلینگ سخت‌گیر + بستن در ‎-0.5R.
+CONTRA_BTC = "against"     # "against" = فقط خلاف روند BTC؛ "off" = بدون این شرط (فقط برای آزمایش کنترل)
+CONTRA_MIN_SL_ATR = 1.0
+CONTRA_LIVE_DEFAULTS = {"strategy": "contrarian_btc", "timeframe": "1d", "min_score": 0.0, "strictness": "normal",
+                        "trailing_enabled": "1", "trail_profile": "strict", "cut_loss_r": 0.5, "htf_enabled": "0",
+                        "early_exit": "0", "btc_filter": "0", "long_only": "0", "min_sl": "0",
+                        "room_to_target": "0", "daily_loss": 0.0, "contra_btc": "against",
+                        "bot_running": "1"}
+# آزمایش روی گذشته‌ی دیده‌نشده: همه‌ی بررسی‌های قبلی روی ۳ سال اخیر بود؛ این بازه قبل از اونه.
+UNSEEN_END = "2023-09-01"
+UNSEEN_DAYS = 1650         # ≈ از فوریه‌ی ۲۰۱۹
+# ارزهایی که از قبل از ۲۰۱۹ روی بایننس بودن و هنوز معامله می‌شن (توجه: خود این انتخاب «سوگیری بازمانده» داره)
+UNSEEN_SYMBOLS = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "XRP/USDT", "ADA/USDT", "LTC/USDT", "LINK/USDT",
+                  "BCH/USDT", "TRX/USDT", "XLM/USDT", "ETC/USDT", "DOGE/USDT", "DASH/USDT", "ZEC/USDT",
+                  "NEO/USDT", "ATOM/USDT", "VET/USDT", "XTZ/USDT", "QTUM/USDT", "ALGO/USDT", "BAT/USDT",
+                  "ZRX/USDT", "ICX/USDT", "THETA/USDT", "ENJ/USDT", "ZIL/USDT", "IOTA/USDT", "ONT/USDT",
+                  "HBAR/USDT", "CHZ/USDT", "RVN/USDT", "IOST/USDT"]
+
 # تنظیمات پیش‌فرض ربات زنده با فیبوناچی (یک‌بار، موقع اولین اجرای نسخه‌ی ۱۴، روی تنظیمات پنل اعمال می‌شه؛
 # بعدش هر چی از پنل انتخاب کنی حفظ می‌شه): ۴ ساعته، RR2، بستن در ‎-0.5R، بدون تریلینگ، بدون تایید HTF
 # (سنجش ورود نشون داد تایید HTF ورودها رو بدتر می‌کنه)، بدون خروج زودهنگام، حداقل امتیاز ۵۰.
@@ -321,7 +341,7 @@ TIMEFRAME_PROFILES = {
     "4h":  {"label": "روندگیری ۴ ساعته", "HTF_TIMEFRAMES": ["1d", "1w", "1M"], "COOLDOWN_HOURS": 24,
             "MAX_HOLD_MINUTES": 0, "SCAN_SYMBOLS": 250, "MAX_DAYS": 1095, "LIMIT_WAIT_BARS": 1},
     "1d":  {"label": "روزانه (روندگیر / مومنتوم هفتگی)", "HTF_TIMEFRAMES": ["1w", "1M"], "COOLDOWN_HOURS": 48,
-            "MAX_HOLD_MINUTES": 0, "SCAN_SYMBOLS": 250, "MAX_DAYS": 1095, "LIMIT_WAIT_BARS": 1},
+            "MAX_HOLD_MINUTES": 0, "SCAN_SYMBOLS": 250, "MAX_DAYS": 2600, "LIMIT_WAIT_BARS": 1},
 }
 # تایم‌فریم روند BTC برای فیلتر رژیم بازار، متناسب با هر پروفایل
 PROFILE_BTC_TIMEFRAME = {"1m": "15m", "5m": "1h", "15m": "4h", "1h": "4h", "4h": "1d", "1d": "1w"}

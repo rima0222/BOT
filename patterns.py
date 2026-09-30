@@ -407,12 +407,21 @@ def _all_patterns(o, h, l, c, atr, order=3):
 
 
 # ==================== سیگنال استراتژی «الگو + ساختار بازار» ====================
+# الگوهای برگشتی کلاسیک (برای استراتژی خلاف‌جهت «جمعیت دیررس»): پوشا، چکش/چکش وارونه/ستاره‌ی دنباله‌دار/
+# مرد آویزان، ستاره‌ی صبحگاهی/شامگاهی، نفوذی/ابر سیاه، کف/سقف دوقلو — نسخه‌ی خودمون اول، بعد TA-Lib (اگه نصبه).
+REVERSAL_PATTERNS = [
+    "cdl_engulfing", "cdl_hammer", "cdl_shooting", "cdl_star", "cdl_piercing", "pat_double",
+    "tal_engulfing", "tal_hammer", "tal_invertedhammer", "tal_shootingstar", "tal_hangingman",
+    "tal_morningstar", "tal_eveningstar", "tal_morningdojistar", "tal_eveningdojistar",
+    "tal_piercing", "tal_darkcloudcover",
+]
 PATTERN_SETS = {
     "all": lambda: list(ALL_PATTERNS),
     "own": lambda: [k for k, _, _ in CANDLE_PATTERNS],
     "chart": lambda: [k for k, _, _ in CHART_PATTERNS],
     "talib": lambda: list(TALIB_NAMES),
     "own+chart": lambda: [k for k, _, _ in CANDLE_PATTERNS + CHART_PATTERNS],
+    "reversal": lambda: [k for k in REVERSAL_PATTERNS if k in ALL_PATTERNS],
 }
 
 
