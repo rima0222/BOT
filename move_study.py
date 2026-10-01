@@ -18,7 +18,7 @@
 import numpy as np
 
 STOP_PCTS = [0.2, 0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 3.0]
-RR_LIST = [2.0, 2.5]
+RR_LIST = [2.0, 2.5, 3.0, 4.0]
 WALK_STEP = 6          # هر ۳۰ دقیقه یک ورود نمونه
 MAX_HOURS = 48
 BAR_MIN = 5

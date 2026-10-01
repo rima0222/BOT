@@ -1688,6 +1688,36 @@ def api_move_start():
     return jsonify({"ok": True, "job_id": job_id})
 
 
+@app.route("/api/scalp/start", methods=["POST"])
+def api_scalp_start():
+    """سنجش اسکلپ چند-تایم‌فریمی (روند ۱۵ دقیقه و ۱ ساعته، ورود ۱ دقیقه) روی کندل‌های ۱ دقیقه‌ای واقعی."""
+    body = request.get_json(force=True, silent=True) or {}
+    days = max(14, min(int(body.get("days", 45)), 90))
+    top_n = max(3, min(int(body.get("top_n", 20)), 40))
+    with compare_lock:
+        if compare_running():
+            return jsonify({"ok": False, "error": "یک کار دیگه در حال اجراست.", "job_id": compare_proc["job_id"]}), 409
+        if backtest_running_job["id"] is not None:
+            return jsonify({"ok": False, "error": "یک بک‌تست تکی در حال اجراست؛ صبر کن تمام بشه."}), 409
+        symbols = (active_symbols["list"] or list(config.SYMBOLS))[:top_n]
+        job_id = uuid.uuid4().hex[:10]
+        cmd = [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "compare.py"),
+               "--scalp-study", "--days", str(days), "--job-id", job_id, "--progress-file", _progress_path(job_id),
+               "--symbols", ",".join(symbols)]
+        _spawn_compare(cmd, job_id, kind="scalp")
+    log.info(f"[سنجش اسکلپ] شروع شد: {job_id} ({days} روز، {len(symbols)} نماد)")
+    return jsonify({"ok": True, "job_id": job_id})
+
+
+@app.route("/api/scalp/result/<job_id>")
+def api_scalp_result(job_id):
+    path = os.path.join(_reports_dir(), f"scalp_{_safe_job_id(job_id)}.json")
+    if not os.path.exists(path):
+        return jsonify({"ok": False, "error": "گزارش پیدا نشد"}), 404
+    with open(path, "r", encoding="utf-8") as f:
+        return jsonify({"ok": True, "report": json.load(f)})
+
+
 @app.route("/api/move/result/<job_id>")
 def api_move_result(job_id):
     path = os.path.join(_reports_dir(), f"move_{_safe_job_id(job_id)}.json")

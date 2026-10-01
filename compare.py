@@ -77,6 +77,8 @@ def main():
                     help="ادامه‌ی یک سنجش ورود نیمه‌کاره با همون --job-id (از جایی که قطع شده)")
     ap.add_argument("--entry-study", action="store_true",
                     help="سنجش کیفیت ورود: هر سیگنال در برابر ورود شانسی (بدون تریلینگ/مدیریت)")
+    ap.add_argument("--scalp-study", action="store_true",
+                    help="سنجش اسکلپ: روند ۱۵ دقیقه و ۱ ساعته، ورود روی ۱ دقیقه، ریسک ۱$ (کندل‌های ۱ دقیقه‌ای واقعی)")
     ap.add_argument("--move-study", action="store_true",
                     help="سنجش فاصله‌ی حد ضرر × کارمزد × زمان روی کندل‌های ۵ دقیقه‌ای واقعی (ورود شانسی، ریسک ۱$)")
     ap.add_argument("--data-only", action="store_true",
@@ -95,8 +97,8 @@ def main():
     if args.entry_study:
         prog.state["kind"] = "entry"
         prog.write()
-    if args.move_study:
-        prog.state["kind"] = "move"
+    if args.move_study or args.scalp_study:
+        prog.state["kind"] = "move" if args.move_study else "scalp"
         prog.write()
     t0 = time.time()
     try:
@@ -133,6 +135,9 @@ def main():
             return
         if args.move_study:
             run_move_study(args, all_symbols, base_cfg, cache, prog, job_id, t0)
+            return
+        if args.scalp_study:
+            run_scalp_study(args, all_symbols, base_cfg, cache, prog, job_id, t0)
             return
 
         # ذخیره‌ی مرحله‌به‌مرحله: هر تایم‌فریمِ تمام‌شده جدا ذخیره می‌شه؛ اگه کار وسط راه قطع بشه (ری‌استارت ربات/
@@ -226,6 +231,52 @@ def main():
         prog.write()
         print(traceback.format_exc(), file=sys.stderr)
         sys.exit(1)
+
+
+def run_scalp_study(args, all_symbols, base_cfg, cache, prog, job_id, t0):
+    import scalp_study as ss
+    days = max(14, min(int(args.days), 90))
+    now = int(time.time() * 1000)
+    since = now - days * 86_400_000
+    prog.update("دانلود کندل‌های ۱ دقیقه‌ای", 0.0)
+    if args.offline:
+        data = {}
+        for s in all_symbols:
+            a = cache.load(s, "1m")
+            data[(s, "1m")] = a if a is not None else RuntimeError("در کش نیست")
+    else:
+        data = cache.ensure_many([(s, "1m", since - 2 * 86_400_000) for s in all_symbols],
+                                 lambda d, tot, sym, tf, res: prog.update(f"دیتا {d}/{tot}: {sym}", d / tot, 0, 0.5))
+    fees = ss.fee_model(base_cfg)
+    split_ms = int(since + (now - since) * ss.IS_FRACTION)
+    per, ok_syms = {}, []
+    for i, s in enumerate(all_symbols):
+        a = data.get((s, "1m"))
+        if a is None or isinstance(a, Exception):
+            continue
+        a = np.asarray(a)
+        a = a[a[:, 0] >= since - 2 * 86_400_000]     # ۲ روز گرم‌کردن برای SMA99 ساعتی
+        if len(a) < 7 * 1440:
+            continue
+        res = ss.run_symbol(a, fees)
+        per[s] = {k: [x for x in v if x[0] >= since] for k, v in res.items()}
+        ok_syms.append(s)
+        prog.update(f"شبیه‌سازی {s} ({i + 1}/{len(all_symbols)})", (i + 1) / len(all_symbols), 0.5, 1.0)
+    if not per:
+        raise RuntimeError("دیتای ۱ دقیقه‌ای قابل‌استفاده نبود")
+    rows = ss.summarize(per, days, split_ms)
+    report = {"kind": "scalp", "job_id": job_id, "created_at": datetime.utcnow().isoformat(), "days": days,
+              "symbols": ok_syms, "rows": rows, "split_ms": split_ms,
+              "fees_pct": {"maker": base_cfg.MAKER_FEE_PCT, "taker": base_cfg.TAKER_FEE_PCT,
+                           "slippage": base_cfg.TAKER_SLIPPAGE_PCT, "funding_8h": base_cfg.FUNDING_PCT_PER_8H},
+              "elapsed_sec": round(time.time() - t0, 1)}
+    out = os.path.join(config.REPORTS_DIR, f"scalp_{job_id}.json")
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False)
+    prog.state.update({"state": "done", "progress": 1.0, "message": "تمام شد", "report": out})
+    prog.write()
+    for r in rows:
+        print(r)
 
 
 def run_move_study(args, all_symbols, base_cfg, cache, prog, job_id, t0):

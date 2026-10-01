@@ -958,6 +958,40 @@ def test_move_study():
     print(f"  ✓ {len(rows)} ردیف؛ ضرر/سود خالص دقیقاً ۱$/۲$")
 
 
+def test_scalp_study():
+    print("۲۰) سنجش اسکلپ (روند ۱۵د+۱س، ورود ۱د): گشت تصادفی → هیچ نوعی سودده نیست؛ روند کاشته‌شده → پیدا می‌شه")
+    import scalp_study as ss
+    days, k = 30, 6
+    n = days * 1440
+    t0 = 1_700_000_000_000 - 1_700_000_000_000 % 3_600_000
+    fees = ss.fee_model(config)
+
+    def make(seed, drift_amp):
+        rng = np.random.default_rng(seed)
+        drift = np.repeat(rng.choice([-1, 1], n // 4000 + 1) * drift_amp, 4000)[:n]
+        steps = (rng.normal(0, 0.0013 / np.sqrt(k), (n, k)) + drift[:, None] / k).ravel()
+        path = 100 * np.exp(np.cumsum(steps)).reshape(n, k)
+        c = path[:, -1]
+        o = np.r_[100, c[:-1]]
+        return np.column_stack([t0 + np.arange(n) * 60000, o, np.maximum(path.max(1), o),
+                                np.minimum(path.min(1), o), c, np.ones(n)])
+    split = t0 + int(n * 0.7) * 60000
+    rows = ss.summarize({"x": ss.run_symbol(make(3, 0.0), fees)}, days, split)
+    good = [r for r in rows if r["avg_usd"] > 0.05 and r["trades"] >= 50]
+    check(not good, f"گشت تصادفی نباید سودده باشه: {good[:2]}")
+    rows = ss.summarize({"x": ss.run_symbol(make(4, 0.00025), fees)}, days, split)
+    tr = {r["variant"]: r for r in rows if r["stop_pct"] == 0.5 and r["rr"] == 2.0}
+    check(tr["trend"]["avg_usd"] > tr["random"]["avg_usd"] + 0.3, f"روند کاشته‌شده پیدا نشد {tr['trend']}")
+    # بدون نگاه به آینده: روند تایم‌فریم بالا فقط از کندل‌های بسته‌شده
+    a = make(5, 0.0)
+    full, _ = ss.htf_trend(a, 15)
+    cut = 20000
+    part, _ = ss.htf_trend(a[:cut], 15)
+    check(bool((full[:cut] == part).all()), "روند ۱۵ دقیقه از آینده استفاده کرده")
+    print(f"  ✓ گشت تصادفی بدون سود؛ روند کاشته‌شده: شانسی {tr['random']['avg_usd']:+.2f}$، "
+          f"فقط روند {tr['trend']['avg_usd']:+.2f}$؛ بدون نگاه به آینده")
+
+
 if __name__ == "__main__":
     t_start = time.time()
     test_strategy_equivalence()
@@ -979,6 +1013,7 @@ if __name__ == "__main__":
     test_pair_alt_filters()
     test_wave2_dense()
     test_move_study()
+    test_scalp_study()
     print()
     if FAILS:
         print(f"❌ {len(FAILS)} خطا")
