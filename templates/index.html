@@ -503,6 +503,7 @@
       <div class="controls-row" style="background:rgba(210,153,34,.10); padding:10px; border-radius:8px;">
         <button id="cmpContraBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">⭐ تست استراتژی شخصی (۳ سال اخیر)</button>
         <button id="cmpWave2Btn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">🌊 تست «موج دوم» + ارز÷BTC + شاخص آلت‌ها</button>
+        <button id="moveBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">📏 سنجش «حد ضرر × کارمزد × زمان» (ریسک ۱$)</button>
         <button id="cmpContraOldBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">🕰 تست استراتژی شخصی روی گذشته‌ی دیده‌نشده (۲۰۱۹ تا ۲۰۲۳)</button>
         <span class="hint">«خلاف جمعیت دیررس» روی روزانه: با/بدون شرط خلاف روند BTC × مدیریت (تریلینگ سخت‌گیر، بستن در ‎-0.5R، ...).
           دکمه‌ی دوم روی بازه‌ای تست می‌کنه که هیچ‌کدوم از بررسی‌های قبلی ندیده بودن (فوریه‌ی ۲۰۱۹ تا سپتامبر ۲۰۲۳، ۳۲ ارز قدیمی) — واقعی‌ترین امتحان.</span>
@@ -540,6 +541,10 @@
         </select>
         <button id="cmpStartBtn" class="btn btn-save">▶ شروع مقایسه</button>
         <span id="cmpMsg" style="font-size:12px;"></span>
+      </div>
+      <div id="moveBox" style="display:none; margin:8px 0;">
+        <div class="hint" id="moveMsg"></div>
+        <div style="overflow-x:auto;"><table id="moveTable"></table></div>
       </div>
       <div class="controls-row" id="cmpProgressRow" style="display:none; flex-direction:column; align-items:flex-start;">
         <div class="pbar"><div class="pbar-fill" id="cmpPbar"></div></div>
@@ -1578,6 +1583,30 @@ function startContra(unseen){
   document.getElementById('cmpStartBtn').click();
 }
 document.getElementById('cmpContraBtn').addEventListener('click', () => startContra(false));
+document.getElementById('moveBtn').addEventListener('click', async () => {
+  const box = document.getElementById('moveBox'), msg = document.getElementById('moveMsg');
+  box.style.display = 'block'; document.getElementById('moveTable').innerHTML = '';
+  const r = await (await fetch('/api/move/start', {method:'POST', headers:{'Content-Type':'application/json'},
+                                                  body: JSON.stringify({days: 60, top_n: 20})})).json();
+  if(!r.ok){ msg.innerText = 'خطا: ' + (r.error||''); return; }
+  const t = setInterval(async () => {
+    const st = await (await fetch(`/api/compare/status/${r.job_id}`)).json();
+    msg.innerText = `${Math.round((st.progress||0)*100)}٪ — ${st.message || st.state}`;
+    if(st.state === 'done'){ clearInterval(t); showMove(r.job_id); }
+    else if(st.state === 'error' || st.state === 'stopped'){ clearInterval(t); }
+  }, 2500);
+});
+async function showMove(jobId){
+  const d = await (await fetch(`/api/move/result/${jobId}`)).json();
+  if(!d.ok) return;
+  const rep = d.report;
+  document.getElementById('moveMsg').innerText =
+    `ورود شانسی (بدون هیچ مزیتی) روی کندل‌های ۵ دقیقه‌ای واقعی، ${rep.symbols.length} ارز، ${rep.days} روز؛ هر معامله ضرر خالص ۱$ یا سود خالص ۲/۲.۵$ با همه‌ی کارمزدها. ` +
+    `میانه‌ی ATR: ` + Object.entries(rep.atr_pct).map(([k,v]) => `${k} ${v}٪`).join('، ') +
+    `. «میانگین$» = سود/زیان هر معامله‌ی شانسی؛ منفی یعنی همون‌قدر ورود باید از شانس بهتر باشه.`;
+  document.getElementById('moveTable').innerHTML = '<thead><tr><th>حد ضرر ٪</th><th>RR</th><th>اندازه‌ی پوزیشن</th><th>لوریج (مارجین ۲۰$)</th><th>کارمزد از ۱$ ضرر</th><th>برد شانسی</th><th>برد لازم</th><th>میانگین هر معامله</th><th>میانه‌ی زمان</th><th>تموم ظرف ۳ ساعت</th></tr></thead><tbody>' +
+    rep.rows.map(x => `<tr><td>${x.stop_pct}٪</td><td>${x.rr}</td><td>${x.notional_usd}$</td><td>${x.leverage_for_margin}x</td><td>${x.fee_on_loss_usd}$ (${x.fee_share_of_risk_pct}٪)</td><td>${x.random_win_pct}٪</td><td>${x.breakeven_win_pct}٪</td><td>${usdCell(x.random_avg_usd)}</td><td>${x.median_minutes} دقیقه</td><td>${x.resolved_3h_pct}٪</td></tr>`).join('') + '</tbody>';
+}
 document.getElementById('cmpWave2Btn').addEventListener('click', () => {
   document.getElementById('cmpDays').value = '730';
   document.getElementById('cmpTopN').value = '40';
@@ -1635,12 +1664,23 @@ function pollCompare(jobId){
         document.getElementById('cmpStartBtn').disabled = false;
         await loadCompareList(jobId);
         loadCompareReport(jobId);
-      } else if(st.state === 'error'){
-        clearInterval(cmpPollTimer);
+      } else if(st.state === 'error' || st.state === 'stopped'){
+        clearInterval(cmpPollTimer); cmpPollTimer = null;
         document.getElementById('cmpProgressRow').style.display = 'none';
         document.getElementById('cmpStartBtn').disabled = false;
         const msg = document.getElementById('cmpMsg');
-        msg.innerText = st.message || 'خطا'; msg.style.color = 'var(--red)';
+        msg.innerText = st.message || 'خطا'; msg.style.color = st.state === 'stopped' ? 'var(--yellow, #d29922)' : 'var(--red)';
+        if(st.resumable){
+          const b = document.createElement('button');
+          b.className = 'btn btn-start'; b.style.marginRight = '10px'; b.innerText = '▶ ادامه';
+          b.onclick = async () => {
+            const r = await (await fetch('/api/compare/resume', {method:'POST', headers:{'Content-Type':'application/json'},
+                                                                 body: JSON.stringify({job_id: jobId})})).json();
+            if(!r.ok){ alert('خطا: ' + (r.error||'')); return; }
+            msg.innerText = ''; pollCompare(jobId);
+          };
+          msg.appendChild(b);
+        }
       }
     }catch(e){ console.error(e); }
   };
@@ -1660,6 +1700,7 @@ async function loadCompareList(selectId){
     }).join('');
     if(selectId) sel.value = selectId;
     if(data.running_job && !cmpPollTimer) pollCompare(data.running_job);
+    else if(data.stopped_job && !cmpPollTimer && !window.__stoppedShown){ window.__stoppedShown = true; pollCompare(data.stopped_job); }
     const c = await (await fetch('/api/data_cache')).json();
     if(c.ok) document.getElementById('cmpCacheInfo').innerText = `کش دیتا: ${c.symbols} نماد، ${c.size_mb} مگابایت`;
     return data;

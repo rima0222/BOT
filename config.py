@@ -30,7 +30,7 @@ STABLECOIN_BASES = [
 
 # --- صرافی برای دریافت دیتای رایگان (بدون نیاز به API Key) ---
 # ترتیب امتحان: اول بایننس، اگه در دسترس نبود کوکوین، بعد اوکی‌اکس
-BOT_VERSION = "19.1"   # نسخه‌ی ربات (توی پنل و فایل بک‌تست نمایش داده می‌شه)
+BOT_VERSION = "19.3"   # نسخه‌ی ربات (توی پنل و فایل بک‌تست نمایش داده می‌شه)
 EXCHANGE_TRY_ORDER = ["binance", "kucoin", "okx"]
 
 # --- تایم‌فریم اصلی برای تولید سیگنال ورود ---
@@ -334,6 +334,7 @@ ALT_INDEX_SYMBOLS = ["ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT",
 # آزمایش روی گذشته‌ی دیده‌نشده: همه‌ی بررسی‌های قبلی روی ۳ سال اخیر بود؛ این بازه قبل از اونه.
 UNSEEN_END = "2023-09-01"
 UNSEEN_DAYS = 1650         # ≈ از فوریه‌ی ۲۰۱۹
+UNSEEN_MIN_COVERAGE = 40   # ارزهایی که وسط بازه لیست شدن هم (از زمان لیست شدن) حساب بشن
 # ارزهایی که از قبل از ۲۰۱۹ روی بایننس بودن و هنوز معامله می‌شن (توجه: خود این انتخاب «سوگیری بازمانده» داره)
 UNSEEN_SYMBOLS = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "XRP/USDT", "ADA/USDT", "LTC/USDT", "LINK/USDT",
                   "BCH/USDT", "TRX/USDT", "XLM/USDT", "ETC/USDT", "DOGE/USDT", "DASH/USDT", "ZEC/USDT",

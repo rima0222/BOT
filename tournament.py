@@ -234,6 +234,21 @@ def run_timeframe(preps, symbols, cfg, tf, start_ms, end_ms, grid="quick", progr
     t0 = time.time()
     order = [s for s in symbols if s in preps]
     split_ms = int(start_ms + (end_ms - start_ms) * is_fraction)
+    confs = build_confs(cfg, tf, grid)
+    return _run_built(preps, order, cfg, tf, start_ms, end_ms, grid, progress_cb, baselines, split_ms, confs, t0)
+
+
+def needed_strategies(cfg, tf, grid, baselines=None):
+    """کلیدهای موتور که این دامنه (و ردیف‌های مبنا) لازم دارن — فقط همین‌ها آماده‌سازی می‌شن (رم/زمان کمتر)."""
+    out = set()
+    for c in build_confs(cfg, tf, grid):
+        out.update(_engine_active(c))
+    for _, c in (baselines or []):
+        out.update(_engine_active(c))
+    return sorted(out)
+
+
+def build_confs(cfg, tf, grid):
     scores = [50, 60, 70, 80, 90] if grid == "full" else [70, 80]
     htf_modes = ([(True, x) for x in cfg.STRICTNESS_PRESETS] if grid == "full"
                  else [(True, "loose"), (True, "normal")]) + [(False, "normal")]
@@ -339,6 +354,10 @@ def run_timeframe(preps, symbols, cfg, tf, start_ms, end_ms, grid="quick", progr
                         for min_sl, room, btc, long_only in itertools.product((False, True), repeat=4):
                             confs.append(_conf(tf, strat, sc, st, htf, trailing, min_sl, room, btc, long_only,
                                                d_retest, d_early, d_daily))
+    return confs
+
+
+def _run_built(preps, order, cfg, tf, start_ms, end_ms, grid, progress_cb, baselines, split_ms, confs, t0):
     total = len(confs)
     last = [0.0]
 

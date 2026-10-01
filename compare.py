@@ -20,6 +20,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 os.chdir(HERE)
 
+import numpy as np  # noqa: E402
 import config  # noqa: E402
 import backtest  # noqa: E402
 import data_fetcher  # noqa: E402
@@ -63,6 +64,9 @@ def main():
                     help="focus = فقط استراتژی شکست باکس و گزینه‌های جدیدش (سریع)")
     ap.add_argument("--end", type=str, default="",
                     help="تاریخ پایان بازه (YYYY-MM-DD، UTC) — برای تست روی گذشته؛ خالی = الان")
+    ap.add_argument("--min-coverage", type=float, default=None,
+                    help="حداقل پوشش دیتای هر نماد در بازه (٪)؛ پیش‌فرض config.MIN_DATA_COVERAGE_PCT. برای تست گذشته "
+                         "کمترش کن تا ارزهایی که وسط بازه لیست شدن هم (فقط از زمان لیست شدن) حساب بشن")
     ap.add_argument("--job-id", type=str, default="")
     ap.add_argument("--progress-file", type=str, default="")
     ap.add_argument("--baseline-file", type=str, default="")
@@ -73,6 +77,8 @@ def main():
                     help="ادامه‌ی یک سنجش ورود نیمه‌کاره با همون --job-id (از جایی که قطع شده)")
     ap.add_argument("--entry-study", action="store_true",
                     help="سنجش کیفیت ورود: هر سیگنال در برابر ورود شانسی (بدون تریلینگ/مدیریت)")
+    ap.add_argument("--move-study", action="store_true",
+                    help="سنجش فاصله‌ی حد ضرر × کارمزد × زمان روی کندل‌های ۵ دقیقه‌ای واقعی (ورود شانسی، ریسک ۱$)")
     ap.add_argument("--data-only", action="store_true",
                     help="فقط دانلود/به‌روزرسانی دیتای تاریخی و بررسی اعتبارش (بدون بک‌تست)")
     args = ap.parse_args()
@@ -83,14 +89,19 @@ def main():
     end_ms = None
     if args.end:
         end_ms = int(datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1000)
-    params = {"days": args.days, "top": args.top, "grid": args.grid, "timeframes": tfs, "end": args.end or None}
+    params = {"days": args.days, "top": args.top, "grid": args.grid, "timeframes": tfs, "end": args.end or None,
+              "baseline_file": args.baseline_file or None, "min_coverage": args.min_coverage}
     prog = Progress(args.progress_file, job_id, params)
     if args.entry_study:
         prog.state["kind"] = "entry"
         prog.write()
+    if args.move_study:
+        prog.state["kind"] = "move"
+        prog.write()
     t0 = time.time()
     try:
-        base_cfg = backtest.build_config(config)
+        base_cfg = backtest.build_config(config, {} if args.min_coverage is None else
+                                         {"MIN_DATA_COVERAGE_PCT": float(args.min_coverage)})
         cache = market_data.MarketDataCache(config.DATA_CACHE_DIR, config.EXCHANGE_TRY_ORDER,
                                             config.DATA_FETCH_MAX_REQ_PER_SEC, config.DATA_FETCH_THREADS)
         if args.symbols:
@@ -120,10 +131,38 @@ def main():
         if args.entry_study:
             run_entry_study(args, tfs, all_symbols, base_cfg, cache, prog, job_id, t0)
             return
+        if args.move_study:
+            run_move_study(args, all_symbols, base_cfg, cache, prog, job_id, t0)
+            return
+
+        # ذخیره‌ی مرحله‌به‌مرحله: هر تایم‌فریمِ تمام‌شده جدا ذخیره می‌شه؛ اگه کار وسط راه قطع بشه (ری‌استارت ربات/
+        # سرور، کمبود رم)، «ادامه» با همون شناسه از اولین تایم‌فریمِ ناتموم شروع می‌کنه (دیتای دانلودشده هم در کشه).
+        work = os.path.join(config.REPORTS_DIR, f"compare_work_{job_id}")
+        os.makedirs(work, exist_ok=True)
+        wp = os.path.join(work, "params.json")
+        if os.path.exists(wp):
+            with open(wp, "r", encoding="utf-8") as f:
+                end_ms = int(json.load(f)["end_ms"])
+        else:
+            end_ms = end_ms or int(time.time() * 1000)
+            with open(wp, "w", encoding="utf-8") as f:
+                json.dump({"end_ms": end_ms, **params}, f, ensure_ascii=False)
 
         all_results, tf_meta, base_rows = [], {}, []
         n_tf = len(tfs)
         for i, tf in enumerate(tfs):
+            tf_path = os.path.join(work, f"tf_{tf}.json")
+            if os.path.exists(tf_path):
+                try:
+                    with open(tf_path, "r", encoding="utf-8") as f:
+                        saved = json.load(f)
+                    all_results += saved["results"]
+                    base_rows += saved["base_rows"]
+                    tf_meta[tf] = saved["meta"]
+                    prog.update(f"{tournament.TF_LABELS.get(tf, tf)}: از قبل انجام شده (ذخیره)", (i + 1) / n_tf)
+                    continue
+                except Exception:
+                    pass
             prof = config.TIMEFRAME_PROFILES[tf]
             cfg = fast_backtest.profile_cfg(base_cfg, tf)
             cfg._NEED_HTF = True   # مقایسه هر دو حالت (با و بدون تایید HTF) رو تست می‌کنه
@@ -135,9 +174,11 @@ def main():
             plan, data = fast_backtest.load_market_data(
                 cache, symbols, days, cfg, lambda m, f: prog.update(f"{label} — {m}", f, lo, lo + span * 0.4),
                 offline=args.offline, now_ms=end_ms)
+            needed = tournament.needed_strategies(cfg, tf, args.grid, baselines)
             preps, meta = fast_backtest.prepare_all(plan, data, symbols, cfg,
                                                     lambda m, f: prog.update(f"{label} — {m}", f, lo + span * 0.4,
-                                                                             lo + span * 0.5))
+                                                                             lo + span * 0.5),
+                                                    strategies_needed=needed)
             del data
             if not preps:
                 tf_meta[tf] = {"timeframe": tf, "days": days, "symbols": [], "error": "دیتای قابل‌استفاده نبود",
@@ -151,6 +192,11 @@ def main():
             tf_meta[tf] = m
             all_results += results
             base_rows += brows
+            tmp = tf_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"results": results, "base_rows": brows, "meta": m}, f, ensure_ascii=False,
+                          default=lambda o: o.item() if hasattr(o, "item") else str(o))
+            os.replace(tmp, tf_path)
             del preps
 
         if not all_results:
@@ -180,6 +226,57 @@ def main():
         prog.write()
         print(traceback.format_exc(), file=sys.stderr)
         sys.exit(1)
+
+
+def run_move_study(args, all_symbols, base_cfg, cache, prog, job_id, t0):
+    import move_study as ms
+    days = max(14, min(int(args.days), 180))
+    now = int(time.time() * 1000)
+    since = now - days * 86_400_000
+    jobs = [(s, "5m", since) for s in all_symbols]
+    prog.update("دانلود کندل‌های ۵ دقیقه‌ای", 0.0)
+    data = {}
+    if args.offline:
+        for s in all_symbols:
+            a = cache.load(s, "5m")
+            data[(s, "5m")] = a if a is not None else RuntimeError("در کش نیست")
+    else:
+        data = cache.ensure_many(jobs, lambda d, tot, sym, tf, res: prog.update(f"دیتا {d}/{tot}: {sym}", d / tot, 0, 0.4))
+    fees = ms.fee_model(base_cfg)
+    per, atrs_all = {}, {"5m": [], "15m": [], "1h": [], "4h": [], "1d": []}
+    ok_syms = []
+    for i, s in enumerate(all_symbols):
+        a = data.get((s, "5m"))
+        if a is None or isinstance(a, Exception) or len(a) < 2000:
+            continue
+        a = np.asarray(a)
+        a = a[a[:, 0] >= since]
+        if len(a) < 2000:
+            continue
+        ok_syms.append(s)
+        per[s] = ms.simulate_symbol(a, fees)
+        atrs_all["5m"].append(ms.atr_pct(a))
+        for tf in ("15m", "1h", "4h", "1d"):
+            r = fast_backtest._resample(a, "5m", tf)
+            atrs_all[tf].append(ms.atr_pct(r))
+        prog.update(f"شبیه‌سازی {s} ({i + 1}/{len(all_symbols)})", (i + 1) / len(all_symbols), 0.4, 1.0)
+    if not per:
+        raise RuntimeError("دیتای ۵ دقیقه‌ای قابل‌استفاده نبود")
+    atrs = {tf: round(float(np.median([v for v in vals if v])), 3) for tf, vals in atrs_all.items()
+            if any(v for v in vals)}
+    rows = ms.summarize(per, fees)
+    text = ms.text_summary(rows, atrs)
+    report = {"kind": "move", "job_id": job_id, "created_at": datetime.utcnow().isoformat(), "days": days,
+              "symbols": ok_syms, "atr_pct": atrs, "rows": rows, "text": text,
+              "fees_pct": {"maker": base_cfg.MAKER_FEE_PCT, "taker": base_cfg.TAKER_FEE_PCT,
+                           "slippage": base_cfg.TAKER_SLIPPAGE_PCT, "funding_8h": base_cfg.FUNDING_PCT_PER_8H},
+              "elapsed_sec": round(time.time() - t0, 1)}
+    out = os.path.join(config.REPORTS_DIR, f"move_{job_id}.json")
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False)
+    prog.state.update({"state": "done", "progress": 1.0, "message": "تمام شد", "report": out})
+    prog.write()
+    print(text)
 
 
 def run_data_only(args, tfs, all_symbols, base_cfg, cache, prog, job_id, t0):

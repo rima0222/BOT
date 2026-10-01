@@ -932,6 +932,32 @@ def test_wave2_dense():
     print(f"  ✓ {total} سیگنال روی همه‌ی کندل‌ها یکسان {per}؛ سبد: {len(res['trades'])} معامله")
 
 
+def test_move_study():
+    print("۱۹) سنجش حد ضرر × کارمزد × زمان: بدون کارمزد، ورود شانسی روی گشت تصادفی ≈ تئوری (سربه‌سر)")
+    import move_study as ms
+    rng = np.random.default_rng(5)
+    n, k = 40000, 20
+    lp = np.cumsum(rng.normal(0, 0.002 / np.sqrt(k), n * k)).reshape(n, k)
+    path = 100 * np.exp(lp)
+    c = path[:, -1]
+    o = np.r_[100, c[:-1]]
+    arr = np.column_stack([np.arange(n) * 300000, o, np.maximum(path.max(1), o), np.minimum(path.min(1), o), c,
+                           np.ones(n)])
+
+    class Z:
+        MAKER_FEE_PCT = TAKER_FEE_PCT = TAKER_SLIPPAGE_PCT = FUNDING_PCT_PER_8H = 0.0
+    fees = ms.fee_model(Z)
+    rows = ms.summarize({"x": ms.simulate_symbol(arr, fees)}, fees)
+    bad = [r for r in rows if r["stop_pct"] <= 1.0 and abs(r["random_avg_usd"]) > 0.12]
+    check(not bad, f"ورود شانسی بدون کارمزد باید حدود صفر باشه: {bad[:2]}")
+    fees_real = ms.fee_model(config)
+    n_, u_ = ms.levels(0.01, 2.0, fees_real)
+    fe, f_sl, f_tp, _, _ = fees_real
+    check(close_enough(n_ * (0.01 + fe + f_sl), 1.0) and close_enough(n_ * (u_ - fe - f_tp), 2.0),
+          "اندازه‌ی پوزیشن/حد سود: ضرر خالص ۱$ و سود خالص ۲$ نشد")
+    print(f"  ✓ {len(rows)} ردیف؛ ضرر/سود خالص دقیقاً ۱$/۲$")
+
+
 if __name__ == "__main__":
     t_start = time.time()
     test_strategy_equivalence()
@@ -952,6 +978,7 @@ if __name__ == "__main__":
     test_wipe_history()
     test_pair_alt_filters()
     test_wave2_dense()
+    test_move_study()
     print()
     if FAILS:
         print(f"❌ {len(FAILS)} خطا")
