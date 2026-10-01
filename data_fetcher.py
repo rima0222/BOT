@@ -4,13 +4,32 @@
 هیچ API Key لازم نیست چون فقط دیتای عمومی قیمت گرفته می‌شه.
 اگه یک صرافی جواب نداد، خودکار می‌ره سراغ بعدی.
 """
+import threading
+
 import ccxt
 import pandas as pd
 
+_local = threading.local()
+# آمار منبع دیتای زنده (برای نمایش در پنل): {صرافی: تعداد درخواست موفق}
+source_stats = {}
+_stats_lock = threading.Lock()
+
 
 def _get_exchange(name):
-    exchange_class = getattr(ccxt, name)
-    return exchange_class({"enableRateLimit": True, "timeout": 15000})
+    """یک نمونه برای هر صرافی در هر رشته (بازار‌ها فقط یک‌بار بارگذاری می‌شن، نه در هر درخواست)."""
+    cache = getattr(_local, "ex", None)
+    if cache is None:
+        cache = {}
+        _local.ex = cache
+    if name not in cache:
+        exchange_class = getattr(ccxt, name)
+        cache[name] = exchange_class({"enableRateLimit": True, "timeout": 15000})
+    return cache[name]
+
+
+def _count(ex_name):
+    with _stats_lock:
+        source_stats[ex_name] = source_stats.get(ex_name, 0) + 1
 
 
 def fetch_ohlcv(symbol, timeframe="15m", limit=300, exchange_name="binance"):
@@ -25,7 +44,11 @@ def fetch_ohlcv_with_fallback(symbol, timeframe, limit, exchange_order):
     last_err = None
     for ex_name in exchange_order:
         try:
-            return fetch_ohlcv(symbol, timeframe, limit, ex_name), ex_name
+            df = fetch_ohlcv(symbol, timeframe, limit, ex_name)
+            if df is None or not len(df):
+                raise RuntimeError("کندلی برنگشت")
+            _count(ex_name)
+            return df, ex_name
         except Exception as e:
             last_err = e
             continue
@@ -70,6 +93,9 @@ def fetch_since(symbol, timeframe, since_ms, exchange_order, max_pages=3, limit=
                 if len(batch) < limit:
                     break
                 cursor = batch[-1][0] + 1
+            if not rows:
+                raise RuntimeError("کندلی برنگشت")
+            _count(ex_name)
             return rows, ex_name
         except Exception as e:
             last_err = e

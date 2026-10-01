@@ -505,6 +505,7 @@
         <button id="cmpWave2Btn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">🌊 تست «موج دوم» + ارز÷BTC + شاخص آلت‌ها</button>
         <button id="moveBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">📏 سنجش «حد ضرر × کارمزد × زمان» (ریسک ۱$)</button>
         <button id="scalpBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">⚡ سنجش اسکلپ: روند ۱۵دقیقه+۱ساعته، ورود ۱ دقیقه (ریسک ۱$)</button>
+        <select id="scalpDays" style="width:110px;" title="بازه‌ی سنجش اسکلپ"><option value="45">۴۵ روز</option><option value="90" selected>۹۰ روز</option></select>
         <button id="cmpContraOldBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">🕰 تست استراتژی شخصی روی گذشته‌ی دیده‌نشده (۲۰۱۹ تا ۲۰۲۳)</button>
         <span class="hint">«خلاف جمعیت دیررس» روی روزانه: با/بدون شرط خلاف روند BTC × مدیریت (تریلینگ سخت‌گیر، بستن در ‎-0.5R، ...).
           دکمه‌ی دوم روی بازه‌ای تست می‌کنه که هیچ‌کدوم از بررسی‌های قبلی ندیده بودن (فوریه‌ی ۲۰۱۹ تا سپتامبر ۲۰۲۳، ۳۲ ارز قدیمی) — واقعی‌ترین امتحان.</span>
@@ -1090,7 +1091,10 @@ async function refresh(){
     const prof = data.timeframe_profiles[data.timeframe];
     document.getElementById('profileHint').innerText =
       `تایید: ${prof.htf.join('، ')} · ${prof.symbols} نماد پرحجم` + (prof.max_hold_min ? ` · حد زمانی ${prof.max_hold_min} دقیقه` : '') +
-      ` · فاندینگ ${data.funding_pct_8h}% هر ۸ ساعت`;
+      ` · فاندینگ ${data.funding_pct_8h}% هر ۸ ساعت` +
+      ` · قیمت زنده: ${(data.live_exchanges||[]).join(' → ')}` +
+      (data.live_source_stats && Object.keys(data.live_source_stats).length ?
+        ' (' + Object.entries(data.live_source_stats).map(([k,v]) => `${k}: ${v}`).join('، ') + ' درخواست)' : '');
     Object.entries(OPT_KEYS).forEach(([id, key]) => {
       if(document.activeElement.id !== id) document.getElementById(id).checked = !!data[key];
     });
@@ -1614,7 +1618,7 @@ document.getElementById('scalpBtn').addEventListener('click', async () => {
   const box = document.getElementById('moveBox'), msg = document.getElementById('moveMsg');
   box.style.display = 'block'; document.getElementById('moveTable').innerHTML = '';
   const r = await (await fetch('/api/scalp/start', {method:'POST', headers:{'Content-Type':'application/json'},
-                                                   body: JSON.stringify({days: 45, top_n: 20})})).json();
+                                                   body: JSON.stringify({days: parseInt(document.getElementById('scalpDays').value) || 90, top_n: 20})})).json();
   if(!r.ok){ msg.innerText = 'خطا: ' + (r.error||''); return; }
   const t = setInterval(async () => {
     const st = await (await fetch(`/api/compare/status/${r.job_id}`)).json();

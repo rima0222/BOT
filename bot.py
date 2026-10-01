@@ -285,7 +285,7 @@ def fetch_symbol_df(symbol, timeframe=None, limit=None):
     limit = limit or config.CANDLE_LIMIT
     try:
         df, used_ex = data_fetcher.fetch_closed_ohlcv(
-            symbol, timeframe, limit, config.EXCHANGE_TRY_ORDER
+            symbol, timeframe, limit, config.LIVE_EXCHANGE_ORDER
         )
         return df
     except Exception as e:
@@ -611,7 +611,7 @@ def scan_symbol(symbol, settings, xs_picks=None):
 
 def latest_1m_price(symbol):
     try:
-        df, _ = data_fetcher.fetch_ohlcv_with_fallback(symbol, "1m", 2, config.EXCHANGE_TRY_ORDER)
+        df, _ = data_fetcher.fetch_ohlcv_with_fallback(symbol, "1m", 2, config.LIVE_EXCHANGE_ORDER)
         return float(df["close"].iloc[-1])
     except Exception:
         return None
@@ -662,7 +662,7 @@ def price_check_job():
                     o_ms = paper_trader.utc_ms(datetime.fromisoformat(open_time))
                     since = min(since, o_ms - (o_ms % 60_000))
             since = max(since, now_ms - 3 * 1000 * 60_000)
-            raw, _ = data_fetcher.fetch_since(symbol, "1m", since, config.EXCHANGE_TRY_ORDER)
+            raw, _ = data_fetcher.fetch_since(symbol, "1m", since, config.LIVE_EXCHANGE_ORDER)
             if not raw:
                 continue
             latest_prices[symbol] = float(raw[-1][4])  # قیمت لحظه‌ای (کندل در حال تشکیل)
@@ -822,6 +822,8 @@ def api_data():
         "btc_filter": settings["btc_filter"],
         "pair_filter": settings["pair_filter"],
         "alt_filter": settings["alt_filter"],
+        "live_exchanges": config.LIVE_EXCHANGE_ORDER,
+        "live_source_stats": dict(data_fetcher.source_stats),
         "rr_override": settings["rr_override"],
         "long_only": settings["long_only"],
         "timeframe": settings["timeframe"],
@@ -1051,7 +1053,7 @@ def api_close_trade():
     symbol = row[0]
 
     try:
-        df, _ = data_fetcher.fetch_ohlcv_with_fallback(symbol, "1m", 2, config.EXCHANGE_TRY_ORDER)
+        df, _ = data_fetcher.fetch_ohlcv_with_fallback(symbol, "1m", 2, config.LIVE_EXCHANGE_ORDER)
         current_price = float(df["close"].iloc[-1])
     except Exception:
         return jsonify({"ok": False, "error": "دریافت قیمت لحظه‌ای ناموفق بود"}), 500
