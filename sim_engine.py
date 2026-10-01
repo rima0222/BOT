@@ -209,6 +209,9 @@ class SimParams:
         self.allow_long = bool(allow_long)
         self.allow_short = bool(allow_short)
         self.btc_filter = bool(btc_filter)
+        # هم‌جهتی نمودار «ارز÷BTC» و «شاخص آلت‌ها÷BTC» (جایگزین OTHERS/BTC) با جهت معامله
+        self.pair_filter = bool(getattr(cfg, "PAIR_FILTER", False))
+        self.alt_filter = bool(getattr(cfg, "ALT_FILTER", False))
         # اجرای سفارش و هزینه‌ها
         self.entry_mode = getattr(cfg, "ENTRY_MODE", "limit")
         tf_ms = _tf_ms(getattr(cfg, "TIMEFRAME", "15m"))
@@ -303,7 +306,7 @@ def merge_candidates(per_symbol, preps, symbol_order):
     ترتیب اسکن ربات زنده). per_symbol: dict symbol -> خروجی signals_engine.combine
     """
     cols = {k: [] for k in ("time", "rank", "sym", "idx", "side", "sl", "tp", "rr", "entry",
-                            "htf_l", "htf_s", "htf_wl", "htf_ws", "btc", "score")}
+                            "htf_l", "htf_s", "htf_wl", "htf_ws", "btc", "score", "pair", "alt", "isbtc")}
     labels = []
     for rank, sym in enumerate(symbol_order):
         cand = per_symbol.get(sym)
@@ -326,6 +329,10 @@ def merge_candidates(per_symbol, preps, symbol_order):
         cols["htf_wl"].append(p.htf_wlong[idx])
         cols["htf_ws"].append(p.htf_wshort[idx])
         cols["btc"].append(p.btc_trend[idx])
+        zero = np.zeros(len(idx), dtype=np.int8)
+        cols["pair"].append(getattr(p, "pair_trend", zero)[idx] if getattr(p, "pair_trend", None) is not None else zero)
+        cols["alt"].append(getattr(p, "alt_trend", zero)[idx] if getattr(p, "alt_trend", None) is not None else zero)
+        cols["isbtc"].append(np.full(len(idx), bool(getattr(p, "is_btc", False))))
         cols["score"].append(cand.get("score", np.zeros(len(idx))))
         labels.extend(cand["label"])
     if not cols["time"]:
@@ -372,6 +379,16 @@ def run_portfolio(merged, preps, symbol_order, P, record=False):
     if P.btc_filter:
         reason[(side_arr == se.LONG) & (btc == -1) & ~contra & (reason == 0)] = 2
         reason[(side_arr == se.SHORT) & (btc == 1) & ~contra & (reason == 0)] = 2
+    # فیلتر ارز÷BTC و شاخص آلت‌ها÷BTC: خرید فقط وقتی صعودیه، فروش فقط وقتی نزولیه (خنثی = رد). BTC خودش معاف.
+    # همون ترتیب و قانون ربات زنده (bot.scan_symbol).
+    if getattr(P, "pair_filter", False):
+        pr = merged["pair"]
+        bad = ~merged["isbtc"] & (((side_arr == se.LONG) & (pr != 1)) | ((side_arr == se.SHORT) & (pr != -1)))
+        reason[bad & (reason == 0)] = 4
+    if getattr(P, "alt_filter", False):
+        al = merged["alt"]
+        bad = ~merged["isbtc"] & (((side_arr == se.LONG) & (al != 1)) | ((side_arr == se.SHORT) & (al != -1)))
+        reason[bad & (reason == 0)] = 5
     if P.use_htf:
         if P.htf_weighted:
             bad_l = (side_arr == se.LONG) & (merged["htf_wl"] < P.htf_min_long_pct - 1e-9)
@@ -380,7 +397,7 @@ def run_portfolio(merged, preps, symbol_order, P, record=False):
             bad_l = (side_arr == se.LONG) & (htf_l < P.htf_min_long)
             bad_s = (side_arr == se.SHORT) & (htf_s < P.htf_min_short)
         reason[(bad_l | bad_s) & (reason == 0)] = 3
-    static_reason = {1: "side_disabled", 2: "btc_regime", 3: "htf_disagreement"}
+    static_reason = {1: "side_disabled", 2: "btc_regime", 3: "htf_disagreement", 4: "pair_btc", 5: "alt_market"}
 
     iter_idx = np.arange(n) if record else np.flatnonzero(reason == 0)
     times = merged["time"]

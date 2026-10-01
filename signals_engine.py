@@ -27,7 +27,8 @@ import market_data
 import money
 
 STRATEGY_NAMES = ["weighted_confluence", "box_breakout", "box_breakout@retest", "trend_follow", "fib_phase",
-                  "pattern_structure", "pattern_structure@free", "contrarian_btc", "contrarian_btc@any"]
+                  "pattern_structure", "pattern_structure@free", "contrarian_btc", "contrarian_btc@any",
+                  "sma_pullback", "sma_pullback@novol"]
 LONG, SHORT = 1, -1
 
 
@@ -136,6 +137,55 @@ def pair_ratio_df(sym_df, btc_df):
                          "volume": np.zeros(len(r))})
 
 
+def alt_index_values(btc_ts, btc_c, members):
+    """
+    شاخص آلت‌کوین‌ها در برابر BTC (جایگزین OTHERS/BTC؛ دیتای مارکت‌کپ از صرافی در دسترس نیست):
+    میانگین بازده لگاریتمی نسبت «ارز÷BTC» سبد ALT_INDEX_SYMBOLS، زنجیره‌ای روی زمان‌های کندل BTC.
+    members: لیست (ts, close). هر قدم فقط از ارزهایی که هر دو کندل رو دارن؛ اگه هیچ‌کدوم نداشتن، قدم صفر.
+    مشترک ربات زنده و موتور (روند داو به ضرب ثابت حساس نیست، پس شروع پنجره فرقی نمی‌کنه).
+    """
+    btc_ts = np.asarray(btc_ts, dtype=np.int64)
+    btc_c = np.asarray(btc_c, dtype=np.float64)
+    n = len(btc_ts)
+    steps = np.zeros(n)
+    cnt = np.zeros(n)
+    for ts, c in members:
+        ts = np.asarray(ts, dtype=np.int64)
+        c = np.asarray(c, dtype=np.float64)
+        if not len(ts):
+            continue
+        pos = np.searchsorted(ts, btc_ts)
+        pos_c = np.minimum(pos, len(ts) - 1)
+        hit = (pos < len(ts)) & (ts[pos_c] == btc_ts) & (c[pos_c] > 0)
+        lr = np.full(n, np.nan)
+        lr[hit] = np.log(c[pos_c[hit]] / btc_c[hit])
+        d = np.r_[np.nan, np.diff(lr)]
+        ok = np.isfinite(d)
+        steps[ok] += d[ok]
+        cnt[ok] += 1
+    step = np.where(cnt > 0, steps / np.maximum(cnt, 1), 0.0)
+    step[0] = 0.0
+    return np.exp(np.cumsum(step))
+
+
+def alt_index_series(member_arrs, btc_arr, tf):
+    btc_arr = np.asarray(btc_arr)
+    members = [(np.asarray(a)[:, 0], np.asarray(a)[:, 4]) for a in member_arrs if a is not None and len(a)]
+    v = alt_index_values(btc_arr[:, 0], btc_arr[:, 4], members)
+    arr = np.column_stack([btc_arr[:, 0], v, v, v, v, np.zeros(len(v))])
+    return Series(arr, tf)
+
+
+def alt_index_df(member_dfs, btc_df):
+    """نسخه‌ی ربات زنده (دیتافریم‌ها) — همون شاخص."""
+    def ms(df):
+        return pd.to_datetime(df["timestamp"]).values.astype("datetime64[ms]").astype("int64")
+    members = [(ms(d), d["close"].values) for d in member_dfs if d is not None and len(d)]
+    v = alt_index_values(ms(btc_df), btc_df["close"].values, members)
+    return pd.DataFrame({"timestamp": btc_df["timestamp"].values, "open": v, "high": v, "low": v, "close": v,
+                         "volume": np.zeros(len(v))})
+
+
 def align_to(main_close_ts, htf_series, htf_trend):
     """روند آخرین کندل بسته‌شده‌ی تایم‌فریم بالاتر در لحظه‌ی بسته‌شدن هر کندل اصلی."""
     idx = np.searchsorted(htf_series.close_ts, main_close_ts, "right") - 1
@@ -229,6 +279,46 @@ def compute_structural(series, cfg, first_idx=0):
         out.update(_structural_pattern(series, cfg, ctx))
     if any(nm.startswith("contrarian_btc") for nm in names):
         out.update(_structural_contrarian(series, cfg, ctx))
+    if any(nm.startswith("sma_pullback") for nm in names):
+        out.update(_structural_wave2(series, cfg, ctx, W))
+    return out
+
+
+def _structural_wave2(series, cfg, ctx, W):
+    """
+    معادل strategies.generate_sma_pullback: پیش‌فیلتر سست (لمس SMA7 با میانگین متحرک تقریبی)، بعد برای هر
+    کاندید دقیقاً همون تابع مشترک strategies.wave2_eval روی همون پنجره. دو کلید: با فیلتر حجم و بدون (@novol).
+    """
+    import strategies
+    o, h, l, c, v = series.o, series.h, series.l, series.c, series.v
+    atr = ctx["atr"]
+    k1 = int(cfg.WV_SMA[0])
+    s1 = pd.Series(c).rolling(k1).mean().values
+    tol = 1e-6
+    with np.errstate(invalid="ignore"):
+        base = ctx["in_range"] & ctx["atr_ok"] & (ctx["wlen"] >= 50) & np.isfinite(s1)
+        cand_l = base & (l <= s1 * (1 + tol)) & (np.minimum(o, c) >= s1 * (1 - tol)) & (c < o)
+        cand_s = base & (h >= s1 * (1 - tol)) & (np.maximum(o, c) <= s1 * (1 + tol)) & (c > o)
+    out = {}
+    for key, use_vol in (("sma_pullback", True), ("sma_pullback@novol", False)):
+        class _C:
+            pass
+        for k in ("WV_SMA", "WV_SLOPE_BARS", "WV_VOL_RECENT", "WV_VOL_BASE", "WV_VOL_MULT", "WV_MAX_EXT_ATR",
+                  "WV_SL_BARS", "WV_MIN_SL_ATR", "WV_COUNTER_BARS"):
+            setattr(_C, k, getattr(cfg, k))
+        _C.WV_VOL = use_vol
+        pair = []
+        for side, cand in (("LONG", cand_l), ("SHORT", cand_s)):
+            idx_l, sl_l = [], []
+            for t in np.flatnonzero(cand).tolist():
+                st = strategies.wave2_eval(side, o, h, l, c, v, atr, t, max(0, t - W + 1), _C)
+                if st is not None:
+                    idx_l.append(t)
+                    sl_l.append(st)
+            idx = np.array(idx_l, dtype=np.int64)
+            pair.append(Structural(idx, np.array(sl_l, dtype=np.float64), np.full(len(idx), np.nan), atr[idx],
+                                   False, np.full(len(idx), np.nan), use_score=False))
+        out[key] = tuple(pair)
     return out
 
 

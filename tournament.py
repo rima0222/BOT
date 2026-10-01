@@ -26,12 +26,14 @@ import sim_engine
 STRATEGIES = ["box_breakout", "weighted_confluence"]
 STRATEGY_LABELS = {"box_breakout": "شکست باکس", "weighted_confluence": "ترکیبی وزن‌دار", "trend_follow": "روندگیر",
                    "xs_momentum": "مومنتوم هفتگی", "fib_phase": "فیبوناچی حرکت دوم",
-                   "pattern_structure": "الگو + ساختار بازار", "contrarian_btc": "⭐ خلاف جمعیت (شخصی)"}
+                   "pattern_structure": "الگو + ساختار بازار", "contrarian_btc": "⭐ خلاف جمعیت (شخصی)",
+                   "sma_pullback": "🌊 موج دوم (SMA7)"}
 TRAIL_FA = {"strict": "تریلینگ سخت‌گیر", "tight": "تریلینگ حساس", "balanced": "تریلینگ متعادل", "loose": "تریلینگ پلکانی"}
 TF_LABELS = {"1m": "۱ دقیقه (اسکلپ)", "5m": "۵ دقیقه (اسکلپ)", "15m": "۱۵ دقیقه", "1h": "۱ ساعته", "4h": "۴ ساعته",
              "1d": "روزانه"}
 STRICT_FA = {"loose": "سبک‌گیر", "normal": "معمولی", "strict": "سخت‌گیر", "very_strict": "خیلی سخت‌گیر"}
-FLAG_DIMS = ("htf", "min_sl", "room", "btc_filter", "long_only", "retest", "early_exit", "daily_loss", "free")
+FLAG_DIMS = ("htf", "min_sl", "room", "btc_filter", "long_only", "retest", "early_exit", "daily_loss", "free",
+             "pair_filter", "alt_filter")
 
 
 def _strat(conf):
@@ -73,8 +75,16 @@ def describe(conf):
         parts.append("ورود با پولبک" if conf.get("retest") else "ورود روی شکست")
     if "pattern_structure" in acts:
         parts.append("بدون فیلتر ساختار داو" if conf.get("free") else "هم‌جهت ساختار داو (HH/HL، LH/LL)")
+    if "sma_pullback" in acts:
+        parts.append("بدون فیلتر حجم (کنترل)" if conf.get("free") else "با فیلتر حجم")
     if "contrarian_btc" in acts:
         parts.append("بدون شرط BTC (کنترل)" if conf.get("free") else "فقط خلاف روند BTC")
+    if conf.get("rr"):
+        parts.append(f"حد سود {conf['rr']:g}R")
+    if conf.get("pair_filter"):
+        parts.append("ارز÷BTC هم‌جهت")
+    if conf.get("alt_filter"):
+        parts.append("شاخص آلت‌ها÷BTC هم‌جهت")
     if conf.get("cut"):
         parts.append(f"بستن در ‎-{conf['cut']:g}R")
     if conf.get("early_exit"):
@@ -105,7 +115,7 @@ def evaluate(preps, order, cfg, conf, split_ms, record=False, merged_cache=None)
     """اجرای یک تنظیم (روی cfg همون تایم‌فریم) و معیارها برای IS / OOS / کل."""
     preset = cfg.STRICTNESS_PRESETS[conf["strictness"]]
     ms = conf.get("min_score")
-    variant = _variant(cfg, preset["MIN_RISK_REWARD"], conf["min_sl"], conf["room"],
+    variant = _variant(cfg, conf.get("rr") or preset["MIN_RISK_REWARD"], conf["min_sl"], conf["room"],
                        cfg.WC_MIN_SCORE_PCT if ms is None else ms)
     active = _engine_active(conf)
     mkey = (tuple(active), conf["combine_mode"], tuple(sorted(variant.items())))
@@ -127,6 +137,8 @@ def evaluate(preps, order, cfg, conf, split_ms, record=False, merged_cache=None)
         P.early = (int(cfg.EARLY_EXIT_BARS), float(cfg.EARLY_EXIT_MIN_R))
     P.daily_loss = float(cfg.DAILY_LOSS_LIMIT_USD) if conf.get("daily_loss") else 0.0
     P.cut = float(conf.get("cut") or 0.0)
+    P.pair_filter = bool(conf.get("pair_filter"))
+    P.alt_filter = bool(conf.get("alt_filter"))
     res = sim_engine.run_portfolio(merged, preps, order, P, record=record)
     sb = P.start_balance
     return res, {
@@ -143,6 +155,8 @@ def _engine_active(conf):
             out.append("box_breakout@retest")
         elif st == "pattern_structure" and conf.get("free"):
             out.append("pattern_structure@free")
+        elif st == "sma_pullback" and conf.get("free"):
+            out.append("sma_pullback@novol")
         elif st == "contrarian_btc" and conf.get("free"):
             out.append("contrarian_btc@any")
         else:
@@ -172,7 +186,7 @@ def _run_confs(preps, order, cfg, confs, split_ms, progress, done_offset, total_
     presets = cfg.STRICTNESS_PRESETS
 
     def group_key(c):
-        rr = presets[c["strictness"]]["MIN_RISK_REWARD"]
+        rr = c.get("rr") or presets[c["strictness"]]["MIN_RISK_REWARD"]
         return (rr, c["min_sl"], c["room"], c.get("min_score") or 0.0)
 
     confs = sorted(confs, key=lambda c: (group_key(c), _strat(c), bool(c.get("retest")), c["strictness"],
@@ -265,6 +279,32 @@ def run_timeframe(preps, symbols, cfg, tf, start_ms, end_ms, grid="quick", progr
                 cf = _conf(tf, "pattern_structure", None, "normal", False, trailing, False, False, False, False,
                            False, False, True, cut)
                 cf["free"] = free
+                confs.append(cf)
+    elif grid == "wave2":
+        # «موج دوم»: فیبوناچی حرکت دوم (اصلاح بعد از موج اول + کندل برگشتی بسته‌شده، حد ضرر زیر اصلاح)
+        # × فیلتر ارز÷BTC / شاخص آلت‌ها÷BTC × حد سود ۲ یا ۲.۵R × مدیریت. + استراتژی شخصی با همین فیلترها.
+        for ms in (0.0, 50.0):
+            for pf, af in ((False, False), (True, False), (False, True), (True, True)):
+                for rr, trailing, cut in ((2.0, False, 0.0), (2.0, False, 0.5), (2.0, "strict", 0.5),
+                                          (2.0, "balanced", 0.5), (2.5, False, 0.5), (2.5, "balanced", 0.5)):
+                    cf = _conf(tf, "fib_phase", ms, "normal", False, trailing, False, False, False, False,
+                               False, False, False, cut)
+                    cf.update({"rr": rr, "pair_filter": pf, "alt_filter": af})
+                    confs.append(cf)
+        # موج دوم به سبک چارت کاربر (پولبک به SMA7): با/بدون فیلتر حجم × فیلترهای BTC × مدیریت
+        for free in (False, True):
+            for pf, af in ((False, False), (True, False), (False, True), (True, True)):
+                for rr, trailing, cut in ((2.0, False, 0.0), (2.0, False, 0.5), (2.0, "loose", 0.0),
+                                          (2.0, "strict", 0.5), (2.5, False, 0.0), (2.5, False, 0.5)):
+                    cf = _conf(tf, "sma_pullback", None, "normal", False, trailing, False, False, False, False,
+                               False, False, False, cut)
+                    cf.update({"rr": rr, "pair_filter": pf, "alt_filter": af, "free": free})
+                    confs.append(cf)
+        for pf, af in ((False, False), (True, False), (False, True), (True, True)):
+            for trailing, cut in (("strict", 0.5), (False, 0.5)):
+                cf = _conf(tf, "contrarian_btc", None, "normal", False, trailing, False, False, False, False,
+                           False, False, False, cut)
+                cf.update({"pair_filter": pf, "alt_filter": af})
                 confs.append(cf)
     elif grid == "contrarian":
         # استراتژی شخصی «خلاف جمعیت»: با/بدون شرط خلاف روند BTC × مدیریت (پیش‌فرض = تریلینگ سخت‌گیر + بستن در ‎-0.5R)
@@ -430,7 +470,9 @@ def _paired_effects(results):
             ("early_exit", "خروج زودهنگام (اگه تا چند کندل جلو نرفت)"),
             ("daily_loss", "حد ضرر روزانه"),
             ("cut", "بستن زودتر در ضرر (‎-0.5R / ‎-0.6R) در برابر حد ضرر کامل"),
-            ("free", "بدون فیلتر (الگو: ساختار داو / خلاف جمعیت: شرط BTC) در برابر با فیلتر")]
+            ("free", "بدون فیلتر اصلی (الگو: ساختار داو / خلاف جمعیت: شرط BTC / موج دوم: حجم) در برابر با فیلتر"),
+            ("pair_filter", "فیلتر ارز÷BTC هم‌جهت (در برابر بدون فیلتر)"),
+            ("alt_filter", "فیلتر شاخص آلت‌ها÷BTC هم‌جهت (در برابر بدون فیلتر)")]
 
     def summarize(dim, label, pairs):
         d = [a["full"]["avg_r"] - b["full"]["avg_r"] for a, b in pairs]
@@ -450,6 +492,18 @@ def _paired_effects(results):
                  if k in off and a["full"]["trades"] >= 10 and off[k]["full"]["trades"] >= 10]
         if pairs:
             out.append(summarize(dim, label, pairs))
+    # حد سود ۲.۵R در برابر ۲R (بقیه ثابت)
+    hi, lo = {}, {}
+    for r in results:
+        rv = r["config"].get("rr")
+        if rv == 2.5:
+            hi[keyf(r["config"], "rr")] = r
+        elif rv == 2.0:
+            lo[keyf(r["config"], "rr")] = r
+    pairs = [(a, lo[k]) for k, a in hi.items()
+             if k in lo and a["full"]["trades"] >= 10 and lo[k]["full"]["trades"] >= 10]
+    if pairs:
+        out.append(summarize("rr", "حد سود ۲.۵R در برابر ۲R", pairs))
 
     # هر پروفایل تریلینگ در برابر بدون تریلینگ
     by_tr = defaultdict(dict)

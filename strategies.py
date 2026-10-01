@@ -584,6 +584,100 @@ def generate_contrarian_btc(df, cfg):
     return _pattern_strategy(df, cfg, CONTRA_KEY, "reversal", _ContraPatCfg(cfg), "contra_btc")
 
 
+# ==================== موج دوم: پولبک به SMA7 در روند قوی (sma_pullback) ====================
+# ستاپ کاربر (چارت AERO، ۱۵ دقیقه): SMA7 > SMA25 > SMA99 و SMA25 رو به بالا (روند)، حجم ۱۰ کندل اخیر بیشتر از
+# میانگین ۵۰ کندل قبلش (پول وارد شده). اصلاح = WV_COUNTER_BARS کندل قرمز پشت سر هم؛ ورود روی بسته‌شدن
+# کندل قرمز دوم، به شرطی که خط زرد (SMA7) از وسط «سایه‌ی پایینش» رد بشه، نه از بدنه (کف ≤ SMA7 ≤ پایین بدنه)،
+# و حجمش کمتر از میانگین اخیر باشه. حد ضرر زیر کف چند کندل اخیر (حداقل WV_MIN_SL_ATR × ATR)، حد سود RR.
+# روند نزولی برعکس (کندل‌های سبز پشت سر هم، خط زرد از سایه‌ی بالایی). اگه قیمت خیلی از SMA99 دور شده، ورود نه.
+WAVE2_KEY = "sma_pullback"
+WAVE2_LABELS = {"wave2_trend": "روند SMA7>25>99", "wave2_touch": "خط زرد از وسط سایه‌ی کندل دوم اصلاح",
+                "wave2_vol": "حجم ورودی + کندل تایید کم‌حجم"}
+
+
+def _sma_at(c, t, k):
+    return float(np.mean(c[t - k + 1:t + 1]))
+
+
+def wave2_eval(side, o, h, l, c, v, atr, t, s0, cfg):
+    """مشترک ربات زنده و موتور بک‌تست. s0 = اولین کندل پنجره. خروجی: حد ضرر یا None."""
+    k1, k2, k3 = (int(x) for x in cfg.WV_SMA)
+    slope = int(cfg.WV_SLOPE_BARS)
+    vr, vb = int(cfg.WV_VOL_RECENT), int(cfg.WV_VOL_BASE)
+    use_vol = getattr(cfg, "WV_VOL", True)
+    need = max(k3, k2 + slope, (vr + vb) if use_vol else 0, int(cfg.WV_SL_BARS))
+    if t - need < s0:
+        return None
+    a = float(atr[t])
+    if not (a > 0):
+        return None
+    s1, s2, s3 = _sma_at(c, t, k1), _sma_at(c, t, k2), _sma_at(c, t, k3)
+    s2p = _sma_at(c, t - slope, k2)
+    ct = float(c[t])
+    long = side == "LONG"
+    nc = int(getattr(cfg, "WV_COUNTER_BARS", 2))
+    if t - nc + 1 < s0:
+        return None
+    ot = float(o[t])
+    if long:
+        # خط زرد از وسط سایه‌ی پایینی (نه بدنه)
+        if not (s1 > s2 > s3 and s2 > s2p and float(l[t]) <= s1 <= min(ot, ct)):
+            return None
+        if any(not (c[t - i] < o[t - i]) for i in range(nc)):     # کندل‌های قرمز پشت سر هم
+            return None
+        if (ct - s3) / a > float(cfg.WV_MAX_EXT_ATR):
+            return None
+    else:
+        if not (s1 < s2 < s3 and s2 < s2p and max(ot, ct) <= s1 <= float(h[t])):
+            return None
+        if any(not (c[t - i] > o[t - i]) for i in range(nc)):     # کندل‌های سبز پشت سر هم
+            return None
+        if (s3 - ct) / a > float(cfg.WV_MAX_EXT_ATR):
+            return None
+    if use_vol:
+        rec = float(np.mean(v[t - vr:t]))
+        base = float(np.mean(v[t - vr - vb:t - vr]))
+        if not (base > 0 and rec >= float(cfg.WV_VOL_MULT) * base and float(v[t]) < rec):
+            return None
+    nb = int(cfg.WV_SL_BARS)
+    d = float(cfg.WV_MIN_SL_ATR) * a
+    if long:
+        return min(float(np.min(l[t - nb + 1:t + 1])) - 0.1 * a, ct - d)
+    return max(float(np.max(h[t - nb + 1:t + 1])) + 0.1 * a, ct + d)
+
+
+def generate_sma_pullback(df, cfg):
+    name = WAVE2_KEY
+    price = float(df["close"].iloc[-1])
+    res = {"trend": "sideways", "price": price, "support": None, "resistance": None, "atr": None,
+           "signal": None, "strategy": name}
+    n = len(df)
+    if n < 50:
+        return res
+    swing_highs, swing_lows = analysis.find_swings(df, order=cfg.SWING_ORDER)
+    res["trend"] = analysis.determine_trend(swing_highs, swing_lows)
+    atr_s = analysis.compute_atr(df, cfg.ATR_PERIOD).values
+    if not (atr_s[-1] > 0):
+        return res
+    res["atr"] = float(atr_s[-1])
+    o = df["open"].values.astype(float)
+    h = df["high"].values.astype(float)
+    l = df["low"].values.astype(float)
+    c = df["close"].values.astype(float)
+    v = df["volume"].values.astype(float)
+    for side in ("LONG", "SHORT"):
+        stop = wave2_eval(side, o, h, l, c, v, atr_s, n - 1, 0, cfg)
+        if stop is None:
+            continue
+        out = analysis.finalize_signal(side, price, stop, None, float(atr_s[-1]), cfg, tp_uses_level=False)
+        if out:
+            out.update({"score": None, "reasons": ["wave2_trend", "wave2_touch"] +
+                        (["wave2_vol"] if getattr(cfg, "WV_VOL", True) else [])})
+            res["signal"] = out
+            return res
+    return res
+
+
 # ==================== مومنتوم نسبی هفتگی (cross-sectional momentum) ====================
 DAY_MS = 86_400_000
 
@@ -675,6 +769,11 @@ STRATEGY_REGISTRY = {
         "label": "⭐ استراتژی شخصی «خلاف جمعیت دیررس»: الگوی برگشتی خلاف روند هفتگی بیت‌کوین (روزانه)، RR2 + تریلینگ سخت‌گیر + بستن در ‎-0.5R",
         "short": "⭐ خلاف جمعیت (شخصی)",
     },
+    "sma_pullback": {
+        "fn": generate_sma_pullback,
+        "label": "🌊 موج دوم (پولبک به SMA7، ۱۵ دقیقه): روند SMA7>25>99 + حجم ورودی، ورود روی کندل قرمز دوم که خط زرد از سایه‌اش رد شده (نه بدنه)، RR2",
+        "short": "🌊 موج دوم (SMA7)",
+    },
     "xs_momentum": {
         "fn": _xs_placeholder,
         "label": "مومنتوم نسبی هفتگی: خرید قوی‌ترین‌ها، فروش ضعیف‌ترین‌ها (فقط روزانه)",
@@ -712,6 +811,8 @@ def engine_key(name, cfg):
         return "box_breakout@retest"
     if name == "pattern_structure" and getattr(cfg, "PAT_STRUCTURE", "with") == "off":
         return "pattern_structure@free"
+    if name == WAVE2_KEY and not getattr(cfg, "WV_VOL", True):
+        return WAVE2_KEY + "@novol"
     if name == CONTRA_KEY and getattr(cfg, "CONTRA_BTC", "against") == "off":
         return CONTRA_KEY + "@any"
     return name
@@ -735,6 +836,9 @@ def reason_labels(reasons):
             continue
         if rs == "contra_btc":
             out.append("خلاف روند هفتگی بیت‌کوین")
+            continue
+        if rs in WAVE2_LABELS:
+            out.append(WAVE2_LABELS[rs])
             continue
         out.append(COMPONENT_LABELS.get(r) or BREAKOUT_LABELS.get(r) or FIB_LABELS.get(rs[4:]) or r)
     return out

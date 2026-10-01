@@ -44,6 +44,16 @@ conn = paper_trader.get_conn(config.DB_PATH)
 
 
 
+def _apply_live_defaults_v19():
+    """یک‌بار (نسخه‌ی ۱۹.۱): ربات زنده با «موج دوم» (پولبک به SMA7) روی ۱۵ دقیقه. تاریخچه پاک نمی‌شه."""
+    if paper_trader.get_setting(conn, "defaults_v19", None) is not None:
+        return
+    for k, v in config.WAVE2_LIVE_DEFAULTS.items():
+        paper_trader.set_setting(conn, k, v)
+    paper_trader.set_setting(conn, "defaults_v19", "1")
+    log.info(f"[نسخه‌ی ۱۹.۱] ربات زنده: موج دوم (SMA7) روی ۱۵ دقیقه: {config.WAVE2_LIVE_DEFAULTS}")
+
+
 def _apply_live_defaults_v18():
     """
     یک‌بار (اولین اجرای نسخه‌ی ۱۸): ربات زنده با استراتژی شخصی «خلاف جمعیت دیررس» و تنظیماتش
@@ -179,6 +189,13 @@ def get_bot_settings():
     def flag(key, default):
         return paper_trader.get_setting(conn, key, "1" if default else "0") == "1"
 
+    try:
+        rr_override = float(paper_trader.get_setting(conn, "rr_override", 0) or 0)
+    except (TypeError, ValueError):
+        rr_override = 0.0
+    if rr_override and not (1.0 <= rr_override <= 5.0):
+        rr_override = 0.0
+
     min_sl = flag("min_sl", getattr(config, "MIN_SL_PCT", 0) > 0 or getattr(config, "MIN_SL_ATR_MULT", 0) > 0)
     room = flag("room_to_target", getattr(config, "REQUIRE_ROOM_TO_TARGET", False))
     btc_filter = flag("btc_filter", getattr(config, "BTC_REGIME_FILTER", False))
@@ -197,7 +214,7 @@ def get_bot_settings():
         "initial_capital": float(initial_capital),
         "strictness": strictness,
         "htf_min_agreement": preset["HTF_MIN_AGREEMENT"],
-        "min_rr": preset["MIN_RISK_REWARD"],
+        "min_rr": rr_override if rr_override > 0 else preset["MIN_RISK_REWARD"],
         "trailing_enabled": trailing_enabled,
         "active_strategies": active_strategies,
         "combine_mode": combine_mode,
@@ -220,6 +237,10 @@ def get_bot_settings():
         "pat_structure": paper_trader.get_setting(conn, "pat_structure", config.PAT_STRUCTURE)
         if paper_trader.get_setting(conn, "pat_structure", config.PAT_STRUCTURE) in ("with", "off") else "with",
         "contra_btc": "off" if paper_trader.get_setting(conn, "contra_btc", config.CONTRA_BTC) == "off" else "against",
+        "pair_filter": flag("pair_filter", config.PAIR_FILTER),
+        "wv_vol": flag("wv_vol", config.WV_VOL),
+        "alt_filter": flag("alt_filter", config.ALT_FILTER),
+        "rr_override": rr_override,
     }
 
 
@@ -229,12 +250,15 @@ def live_config_snapshot(settings=None):
     return {"timeframe": st["timeframe"], "active_strategies": st["active_strategies"],
             "combine_mode": st["combine_mode"], "min_score": st["min_score"],
             "free": (st["contra_btc"] == "off") if "contrarian_btc" in st["active_strategies"]
+            else (not st["wv_vol"]) if "sma_pullback" in st["active_strategies"]
             else st["pat_structure"] == "off",
             "trail_profile": st["trail_profile"], "retest": st["retest"], "early_exit": st["early_exit"],
             "daily_loss": st["daily_loss"] > 0, "cut_loss_r": st["cut_loss_r"], "cut": st["cut_loss_r"],
             "strictness": st["strictness"], "trailing": st["trail_profile"] if st["trailing_enabled"] else False,
             "min_sl": st["min_sl"],
-            "room": st["room"], "btc_filter": st["btc_filter"], "long_only": st["long_only"], "htf": st["htf"]}
+            "room": st["room"], "btc_filter": st["btc_filter"], "long_only": st["long_only"], "htf": st["htf"],
+            "pair_filter": st["pair_filter"], "alt_filter": st["alt_filter"],
+            "rr": st["rr_override"] if st["rr_override"] > 0 else None}
 
 
 def refresh_symbols_job():
@@ -289,6 +313,9 @@ def get_effective_cfg(settings):
         "CUT_LOSS_R": settings["cut_loss_r"],
         "PAT_STRUCTURE": settings.get("pat_structure", config.PAT_STRUCTURE),
         "CONTRA_BTC": settings.get("contra_btc", config.CONTRA_BTC),
+        "PAIR_FILTER": settings.get("pair_filter", False),
+        "WV_VOL": settings.get("wv_vol", True),
+        "ALT_FILTER": settings.get("alt_filter", False),
     }
     # پروفایل تایم‌فریم انتخاب‌شده (تایم‌فریم‌های تایید، کول‌داون، حد زمانی، ...)
     cfg = fast_backtest.profile_cfg(config, settings["timeframe"])
@@ -326,6 +353,26 @@ def pair_trend_live(symbol, cfg):
     if len(rdf) < config.SWING_ORDER * 2 + 5:
         return None
     return analysis.trend_from_df(rdf, swing_order=config.SWING_ORDER)
+
+
+alt_state = {"trend": None, "time": 0, "tf": None}
+
+
+def alt_trend_live(cfg):
+    """روند داو شاخص آلت‌ها÷BTC (سبد config.ALT_INDEX_SYMBOLS) — مثل موتور: آخرین HTF_CANDLE_LIMIT کندل."""
+    now = time.time()
+    tf = getattr(cfg, "BTC_REGIME_TIMEFRAME", config.BTC_REGIME_TIMEFRAME)
+    if alt_state["tf"] == tf and now - alt_state["time"] < 60:
+        return alt_state["trend"]
+    bdf = fetch_symbol_df(config.BTC_REGIME_SYMBOL, timeframe=tf, limit=config.HTF_CANDLE_LIMIT)
+    trend = None
+    if bdf is not None and len(bdf):
+        members = [fetch_symbol_df(s, timeframe=tf, limit=config.HTF_CANDLE_LIMIT) for s in config.ALT_INDEX_SYMBOLS]
+        idf = signals_engine.alt_index_df(members, bdf)
+        if len(idf) >= config.SWING_ORDER * 2 + 5:
+            trend = analysis.trend_from_df(idf, swing_order=config.SWING_ORDER)
+    alt_state.update({"trend": trend, "time": now, "tf": tf})
+    return trend
 
 
 def check_htf_confirmation(symbol, side, min_agreement, htf_timeframes=None, cfg=None, preset=None):
@@ -478,6 +525,16 @@ def scan_symbol(symbol, settings, xs_picks=None):
         if (sig["side"] == "LONG" and btc_trend == "downtrend") or (sig["side"] == "SHORT" and btc_trend == "uptrend"):
             reject("btc_regime")
             return
+
+    # ۲.۵) هم‌جهتی «ارز÷BTC» و «شاخص آلت‌ها÷BTC» با جهت معامله (BTC خودش معاف) — همون قانون موتور
+    want = "uptrend" if sig["side"] == "LONG" else "downtrend"
+    is_btc = symbol == config.BTC_REGIME_SYMBOL
+    if settings["pair_filter"] and not is_btc and pair_trend_live(symbol, cfg) != want:
+        reject("pair_btc")
+        return
+    if settings["alt_filter"] and not is_btc and alt_trend_live(cfg) != want:
+        reject("alt_market")
+        return
 
     # ۳) تایید چند-تایم‌فریمی (اختیاری، از پنل) با سطح سخت‌گیری فعلی (SHORT به تاییدیه‌ی بیشتری نیاز داره)
     htf_detail, htf_agree = "خاموش", None
@@ -763,6 +820,9 @@ def api_data():
         "min_sl": settings["min_sl"],
         "room": settings["room"],
         "btc_filter": settings["btc_filter"],
+        "pair_filter": settings["pair_filter"],
+        "alt_filter": settings["alt_filter"],
+        "rr_override": settings["rr_override"],
         "long_only": settings["long_only"],
         "timeframe": settings["timeframe"],
         "entry_mode": settings["entry_mode"],
@@ -913,8 +973,18 @@ def api_control():
         else:
             return jsonify({"ok": False, "error": "مدل ورود نامعتبر است"}), 400
 
+    if "rr" in body:
+        try:
+            rv = float(body["rr"] or 0)
+            if rv and not (1.0 <= rv <= 5.0):
+                raise ValueError
+            paper_trader.set_setting(conn, "rr_override", rv)
+            log.info(f"[کنترل پنل] حد سود: {'پیش‌فرض سطح سخت‌گیری' if not rv else f'{rv}R'}")
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "حد سود (R) نامعتبر است"}), 400
     for key, setting in (("htf", "htf_enabled"), ("min_sl", "min_sl"), ("room", "room_to_target"),
-                         ("btc_filter", "btc_filter"), ("long_only", "long_only")):
+                         ("btc_filter", "btc_filter"), ("long_only", "long_only"),
+                         ("pair_filter", "pair_filter"), ("alt_filter", "alt_filter")):
         if key in body:
             paper_trader.set_setting(conn, setting, "1" if body[key] else "0")
             log.info(f"[کنترل پنل] {key}: {'روشن' if body[key] else 'خاموش'}")
@@ -1116,6 +1186,17 @@ def api_backtest_start():
         overrides["REQUIRE_ROOM_TO_TARGET"] = bool(body["room"])
     if "btc_filter" in body:
         overrides["BTC_REGIME_FILTER"] = bool(body["btc_filter"])
+    _lv = get_bot_settings()
+    overrides["PAIR_FILTER"] = bool(body["pair_filter"]) if "pair_filter" in body else _lv["pair_filter"]
+    overrides["WV_VOL"] = _lv["wv_vol"]
+    overrides["ALT_FILTER"] = bool(body["alt_filter"]) if "alt_filter" in body else _lv["alt_filter"]
+    if body.get("rr"):
+        try:
+            overrides["MIN_RISK_REWARD"] = max(1.0, min(5.0, float(body["rr"])))
+        except (TypeError, ValueError):
+            pass
+    elif "rr" not in body and _lv["rr_override"] > 0:
+        overrides["MIN_RISK_REWARD"] = _lv["rr_override"]
     if body.get("long_only"):
         overrides["ALLOW_SHORT"] = False
     if body.get("entry_mode") in ("limit", "market"):
@@ -1325,7 +1406,7 @@ def api_compare_start():
     body = request.get_json(force=True, silent=True) or {}
     days = max(60, min(int(body.get("days_override") or body.get("days", 365)), 1095))
     top_n = max(3, min(int(body.get("top_n", 20)), 60))
-    grid = body.get("grid") if body.get("grid") in ("full", "focus", "all", "fib", "pattern", "contrarian") \
+    grid = body.get("grid") if body.get("grid") in ("full", "focus", "all", "fib", "pattern", "contrarian", "wave2") \
         else "quick"
     unseen = bool(body.get("unseen"))
     tfs = [t for t in (body.get("timeframes") or ["15m", "1h", "4h"]) if t in config.TIMEFRAME_PROFILES]
@@ -1568,6 +1649,8 @@ def api_compare_apply():
     if "free" in c:
         if "contrarian_btc" in act:
             paper_trader.set_setting(conn, "contra_btc", "off" if c["free"] else "against")
+        elif "sma_pullback" in act:
+            paper_trader.set_setting(conn, "wv_vol", "0" if c["free"] else "1")
         else:
             paper_trader.set_setting(conn, "pat_structure", "off" if c["free"] else "with")
     if "early_exit" in c:
@@ -1577,6 +1660,9 @@ def api_compare_apply():
     paper_trader.set_setting(conn, "min_sl", "1" if c.get("min_sl") else "0")
     paper_trader.set_setting(conn, "room_to_target", "1" if c.get("room") else "0")
     paper_trader.set_setting(conn, "btc_filter", "1" if c.get("btc_filter") else "0")
+    paper_trader.set_setting(conn, "pair_filter", "1" if c.get("pair_filter") else "0")
+    paper_trader.set_setting(conn, "alt_filter", "1" if c.get("alt_filter") else "0")
+    paper_trader.set_setting(conn, "rr_override", float(c.get("rr") or 0))
     paper_trader.set_setting(conn, "long_only", "1" if c.get("long_only") else "0")
     if c.get("timeframe") in config.TIMEFRAME_PROFILES:
         paper_trader.set_setting(conn, "timeframe", c["timeframe"])
@@ -1903,6 +1989,7 @@ if __name__ == "__main__":
     _apply_live_defaults_v14()
     _apply_live_defaults_v16()
     _apply_live_defaults_v18()
+    _apply_live_defaults_v19()
     scheduler.start()
     threading.Thread(target=_auto_resume_entry, daemon=True).start()
     log.info("ربات معامله‌گر مجازی استارت شد.")

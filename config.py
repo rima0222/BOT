@@ -30,7 +30,7 @@ STABLECOIN_BASES = [
 
 # --- صرافی برای دریافت دیتای رایگان (بدون نیاز به API Key) ---
 # ترتیب امتحان: اول بایننس، اگه در دسترس نبود کوکوین، بعد اوکی‌اکس
-BOT_VERSION = "18"   # نسخه‌ی ربات (توی پنل و فایل بک‌تست نمایش داده می‌شه)
+BOT_VERSION = "19.1"   # نسخه‌ی ربات (توی پنل و فایل بک‌تست نمایش داده می‌شه)
 EXCHANGE_TRY_ORDER = ["binance", "kucoin", "okx"]
 
 # --- تایم‌فریم اصلی برای تولید سیگنال ورود ---
@@ -303,6 +303,34 @@ CONTRA_LIVE_DEFAULTS = {"strategy": "contrarian_btc", "timeframe": "1d", "min_sc
                         "early_exit": "0", "btc_filter": "0", "long_only": "0", "min_sl": "0",
                         "room_to_target": "0", "daily_loss": 0.0, "contra_btc": "against",
                         "bot_running": "1"}
+# ==================== استراتژی ۸: موج دوم — پولبک به SMA7 (sma_pullback، نسخه‌ی ۱۹.۱) ====================
+WV_SMA = (7, 25, 99)       # زرد، آبی، قرمز
+WV_SLOPE_BARS = 5          # SMA25 باید نسبت به ۵ کندل قبل بالاتر (خرید) / پایین‌تر (فروش) باشه
+WV_VOL = True              # فیلتر حجم: ورود پول + کندل تایید کم‌حجم
+WV_VOL_RECENT = 10         # میانگین حجم ۱۰ کندل اخیر ...
+WV_VOL_BASE = 50           # ... در برابر میانگین ۵۰ کندل قبل از اون
+WV_VOL_MULT = 1.3          # حداقل ۱.۳ برابر
+WV_MAX_EXT_ATR = 6.0       # حداکثر فاصله‌ی قیمت از SMA99 (بر حسب ATR) — بیشتر = آخر حرکت، ورود نه
+WV_COUNTER_BARS = 2        # تعداد کندل‌های اصلاحی پشت سر هم (قرمز در روند صعودی)؛ ورود روی آخری
+WV_SL_BARS = 3             # حد ضرر زیر کف ۳ کندل اخیر (+۰.۱ ATR) ...
+WV_MIN_SL_ATR = 1.0        # ... ولی حداقل ۱ ATR
+# پیش‌فرض ربات زنده از نسخه‌ی ۱۹.۱ (یک‌بار؛ تاریخچه پاک نمی‌شه — برای شروع از صفر دکمه‌ی 🧹 پنل)
+WAVE2_LIVE_DEFAULTS = {"strategy": "sma_pullback", "timeframe": "15m", "strictness": "normal", "rr_override": 2.0,
+                       "trailing_enabled": "0", "cut_loss_r": 0.5, "htf_enabled": "0", "early_exit": "0",
+                       "btc_filter": "0", "long_only": "0", "min_sl": "0", "room_to_target": "0",
+                       "pair_filter": "0", "alt_filter": "0", "wv_vol": "1", "daily_loss": 0.0, "bot_running": "1"}
+
+# ==================== فیلتر «ارز÷BTC» و «شاخص آلت‌ها÷BTC» (نسخه‌ی ۱۹) ====================
+# ایده: وقتی نمودار ارز÷BTC (مثلاً ETH/BTC) هم در جهت معامله روند داره، حرکت قوی‌تره؛ و وقتی کل آلت‌ها
+# نسبت به BTC قوی‌ان (مثل OTHERS.D صعودی) فضای بازار برای آلت‌ها بهتره. هر دو روی تایم‌فریم روند BTC
+# (روزانه → هفتگی، ۴ ساعته → روزانه) با تئوری داو. خرید فقط وقتی صعودی، فروش فقط وقتی نزولی.
+# OTHERS.D خود تریدینگ‌ویو (بر اساس مارکت‌کپ) از صرافی قابل‌دریافت نیست؛ جایگزین: میانگین نسبت ارز÷BTC
+# این سبد ثابت (برای ربات زنده و بک‌تست یکسان).
+PAIR_FILTER = False
+ALT_FILTER = False
+ALT_INDEX_SYMBOLS = ["ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT", "DOGE/USDT", "TRX/USDT",
+                     "LINK/USDT", "AVAX/USDT", "DOT/USDT", "LTC/USDT", "BCH/USDT", "XLM/USDT", "HBAR/USDT"]
+
 # آزمایش روی گذشته‌ی دیده‌نشده: همه‌ی بررسی‌های قبلی روی ۳ سال اخیر بود؛ این بازه قبل از اونه.
 UNSEEN_END = "2023-09-01"
 UNSEEN_DAYS = 1650         # ≈ از فوریه‌ی ۲۰۱۹

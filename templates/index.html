@@ -296,6 +296,10 @@
           <label class="switch-label" title="اگه مقاومت/حمایت مقابل زودتر از هدف R:R سر راه باشه، معامله باز نمی‌شه"><input type="checkbox" id="optRoom"> شرط فضای کافی تا هدف</label>
           <label class="switch-label" title="خرید فقط وقتی روند ۴ساعته‌ی BTC نزولی نیست؛ فروش فقط وقتی صعودی نیست"><input type="checkbox" id="optBtc"> فیلتر روند بیت‌کوین</label>
           <label class="switch-label"><input type="checkbox" id="optLongOnly"> فقط خرید (بدون فروش)</label>
+          <label class="switch-label" title="خرید فقط وقتی نمودار ارز÷BTC (مثلاً ETH/BTC) در تایم‌فریم روند BTC صعودیه؛ فروش فقط وقتی نزولیه"><input type="checkbox" id="optPair"> ارز÷BTC هم‌جهت</label>
+          <label class="switch-label" title="خرید فقط وقتی کل آلت‌ها نسبت به BTC صعودی‌ان (جایگزین OTHERS.D)؛ فروش فقط وقتی نزولی‌ان"><input type="checkbox" id="optAlt"> شاخص آلت‌ها÷BTC هم‌جهت</label>
+          <label style="margin-right:8px;">حد سود:</label>
+          <select id="rrSelect" style="width:150px;"><option value="0">پیش‌فرض (۲R)</option><option value="2">2R</option><option value="2.5">2.5R</option><option value="3">3R</option></select>
         </div>
       </div>
     </div>
@@ -309,6 +313,7 @@
         <label>سرمایه جدید ($):</label>
         <input type="number" id="capitalInput" min="1" step="1">
         <button id="resetCapitalBtn" class="btn btn-stop">ریست سرمایه</button>
+        <button id="resetAllBtn" class="btn btn-stop" title="همه‌ی معاملات (حتی بازها)، لاگ سیگنال‌ها و نمودار موجودی پاک می‌شن؛ تنظیمات می‌مونن">🧹 شروع از صفر</button>
         <span id="resetMsg" style="font-size:12px;"></span>
       </div>
     </div>
@@ -494,6 +499,13 @@
         <button id="cmpAllBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">🏆 مقایسه‌ی همه‌ی استراتژی‌ها با یک کلیک</button>
         <button id="cmpFibBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">📐 تست فیبوناچی با یک کلیک</button>
         <button id="cmpPatBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">🕯 تست «الگو + ساختار بازار» با یک کلیک</button>
+      </div>
+      <div class="controls-row" style="background:rgba(210,153,34,.10); padding:10px; border-radius:8px;">
+        <button id="cmpContraBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">⭐ تست استراتژی شخصی (۳ سال اخیر)</button>
+        <button id="cmpWave2Btn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">🌊 تست «موج دوم» + ارز÷BTC + شاخص آلت‌ها</button>
+        <button id="cmpContraOldBtn" class="btn btn-start" style="font-size:15px; padding:10px 18px;">🕰 تست استراتژی شخصی روی گذشته‌ی دیده‌نشده (۲۰۱۹ تا ۲۰۲۳)</button>
+        <span class="hint">«خلاف جمعیت دیررس» روی روزانه: با/بدون شرط خلاف روند BTC × مدیریت (تریلینگ سخت‌گیر، بستن در ‎-0.5R، ...).
+          دکمه‌ی دوم روی بازه‌ای تست می‌کنه که هیچ‌کدوم از بررسی‌های قبلی ندیده بودن (فوریه‌ی ۲۰۱۹ تا سپتامبر ۲۰۲۳، ۳۲ ارز قدیمی) — واقعی‌ترین امتحان.</span>
         <span class="hint">روندگیر، شکست باکس، ترکیبی وزن‌دار و ترکیب‌هاشون — با/بدون تایید HTF، تریلینگ، پولبک، خروج زودهنگام، بستن در ‎-0.6R —
           + روی روزانه: روندگیر و مومنتوم هفتگی — روی ۱۵ دقیقه، ۱ ساعته، ۴ ساعته و روزانه، ۲ سال، ۳۰ نماد. یک گزارش، با بهترین انتخاب و دکمه‌ی اعمال روی ربات.</span>
       </div>
@@ -518,6 +530,8 @@
         <label>دامنه:</label>
         <select id="cmpGrid" style="width:260px;">
           <option value="all" selected>🏆 همه‌ی استراتژی‌ها و ترکیب‌ها — حدود ۷۰ تنظیم برای هر تایم‌فریم</option>
+          <option value="wave2">🌊 موج دوم (پولبک به SMA7 و فیبوناچی) × فیلتر ارز÷BTC / شاخص آلت‌ها × حد سود ۲ و ۲.۵R × مدیریت — ۱۰۴ تنظیم برای هر تایم‌فریم</option>
+          <option value="contrarian">⭐ استراتژی شخصی «خلاف جمعیت» — با/بدون شرط BTC × مدیریت — ۱۰ تنظیم</option>
           <option value="pattern">🕯 الگو + ساختار بازار — با/بدون فیلتر ساختار × (RR2 ثابت / ۳ تریلینگ / بستن در ‎-0.5R / تریلینگ+بستن) — ۱۲ تنظیم</option>
           <option value="fib">📐 فیبوناچی حرکت دوم — حداقل امتیاز × (RR2 ثابت / بستن در ‎-0.5R / تریلینگ / هر دو) × HTF — ۳۲ تنظیم</option>
           <option value="focus">🎯 فقط شکست باکس + گزینه‌هاش — ۲۴۰ تنظیم</option>
@@ -622,6 +636,9 @@
           <label class="switch-label"><input type="checkbox" id="btRoom"> فضای کافی تا هدف</label>
           <label class="switch-label"><input type="checkbox" id="btBtc"> فیلتر BTC</label>
           <label class="switch-label"><input type="checkbox" id="btLongOnly"> فقط خرید</label>
+          <label class="switch-label"><input type="checkbox" id="btPair"> ارز÷BTC هم‌جهت</label>
+          <label class="switch-label"><input type="checkbox" id="btAlt"> آلت‌ها÷BTC هم‌جهت</label>
+          <label>حد سود:</label><select id="btRr" style="width:90px;"><option value="0">پیش‌فرض</option><option value="2">2R</option><option value="2.5">2.5R</option><option value="3">3R</option></select>
         </div>
         <span id="btMinScoreBox"><label style="margin-right:14px;">حداقل امتیاز:</label>
         <select id="btMinScore" style="width:100px;"></select></span>
@@ -794,7 +811,8 @@ function resultBadge(result, et){
 
 const STRAT_FA = {weighted_confluence: 'ترکیبی وزن‌دار', box_breakout: 'شکست باکس', 'box_breakout@retest': 'شکست باکس (پولبک)',
                   trend_follow: 'روندگیر', xs_momentum: 'مومنتوم هفتگی', fib_phase: 'فیبوناچی حرکت دوم',
-                  pattern_structure: 'الگو + ساختار بازار', 'pattern_structure@free': 'الگو (بدون فیلتر ساختار)'};
+                  pattern_structure: 'الگو + ساختار بازار', 'pattern_structure@free': 'الگو (بدون فیلتر ساختار)',
+                  contrarian_btc: '⭐ خلاف جمعیت (شخصی)', sma_pullback: '🌊 موج دوم (SMA7)', 'sma_pullback@novol': 'موج دوم بدون فیلتر حجم', 'contrarian_btc@any': 'خلاف جمعیت بدون شرط BTC'};
 function stratName(n){ return STRAT_FA[n] || n || '—'; }
 function htfTxt(v){ return (v === null || v === undefined) ? '—' : (v > 5 || window.__htfWeighted ? v + '٪' : v + '/5'); }
 
@@ -845,7 +863,7 @@ document.getElementById('trailingToggle').addEventListener('change', async (e) =
   refresh();
 });
 
-const OPT_KEYS = {optHtf: 'htf', optMinSl: 'min_sl', optRoom: 'room', optBtc: 'btc_filter', optLongOnly: 'long_only',
+const OPT_KEYS = {optHtf: 'htf', optMinSl: 'min_sl', optRoom: 'room', optBtc: 'btc_filter', optLongOnly: 'long_only', optPair: 'pair_filter', optAlt: 'alt_filter',
                   optRetest: 'retest', optEarly: 'early_exit'};
 Object.entries(OPT_KEYS).forEach(([id, key]) => {
   document.getElementById(id).addEventListener('change', async (e) => {
@@ -863,6 +881,7 @@ async function postControl(body){
   if(!data.ok) alert('خطا: ' + (data.error||''));
   refresh();
 }
+document.getElementById('rrSelect').addEventListener('change', (e) => postControl({rr: parseFloat(e.target.value) || 0}));
 document.getElementById('timeframeSelect').addEventListener('change', (e) => {
   if(!confirm('تایم‌فریم ربات عوض بشه؟ پوزیشن‌های باز فعلی مثل قبل مدیریت می‌شن؛ فقط سیگنال‌های جدید با تایم‌فریم جدید ساخته می‌شن.')){ refresh(); return; }
   postControl({timeframe: e.target.value});
@@ -895,6 +914,19 @@ document.getElementById('resetCapitalBtn').addEventListener('click', async () =>
   msg.innerText = data.ok ? '✓ سرمایه ریست شد' : ('خطا: ' + (data.error || ''));
   msg.style.color = data.ok ? 'var(--green)' : 'var(--red)';
   setTimeout(() => msg.innerText = '', 5000);
+  refresh();
+});
+
+document.getElementById('resetAllBtn').addEventListener('click', async () => {
+  const msg = document.getElementById('resetMsg');
+  const v = parseFloat(document.getElementById('capitalInput').value);
+  if (!confirm('همه‌ی معاملات (حتی پوزیشن‌های باز)، لاگ سیگنال‌ها و نمودار موجودی پاک بشن و ربات از صفر شروع کنه؟ برگشت‌ناپذیره.')) return;
+  const res = await fetch('/api/reset_all', {method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({confirm: 'RESET', amount: (isNaN(v) || v <= 0) ? null : v})});
+  const data = await res.json();
+  msg.innerText = data.ok ? '✓ همه‌چیز پاک شد؛ از صفر شروع شد' : ('خطا: ' + (data.error || ''));
+  msg.style.color = data.ok ? 'var(--green)' : 'var(--red)';
+  setTimeout(() => msg.innerText = '', 6000);
   refresh();
 });
 
@@ -967,7 +999,7 @@ async function refresh(){
     document.getElementById('total').innerText = data.stats.total_trades;
     document.getElementById('winsCount').innerText = data.stats.wins;
     document.getElementById('lossesCount').innerText = data.stats.losses;
-    document.getElementById('winrate').innerText = data.stats.win_rate + '%' + ` (${data.stats.rr_trades})`;
+    document.getElementById('winrate').innerText = data.stats.win_rate + '%' + ` (${data.stats.rr_trades})` + (data.stats.total_trades ? ` — در سود: ${data.stats.pos_rate}%` : '');
     const tr = data.stats;
     document.getElementById('trailStats').innerHTML = tr.trail_trades
       ? `${tr.trail_trades} معامله · <span class="${tr.trail_pnl>=0?'green':'red'}" dir="ltr">${tr.trail_pnl>=0?'+':''}${fmt(tr.trail_pnl,2)}$ (${tr.trail_pct>=0?'+':''}${tr.trail_pct}%)</span>`
@@ -1024,6 +1056,8 @@ async function refresh(){
     document.getElementById('patBox').style.display = acts.includes('pattern_structure') ? '' : 'none';
     if(document.activeElement.id !== 'patStructSelect') document.getElementById('patStructSelect').value = data.pat_structure || 'with';
     if(acts.includes('pattern_structure')) infos.push(`الگو + ساختار بازار: ${data.pat_info.count} الگو (کندلی خود ربات، TA-Lib، کلاسیک)؛ ورود روی کندل بسته‌شده‌ی الگو${data.pat_structure === 'off' ? '' : '، فقط هم‌جهت ساختار داو'}؛ حد ضرر کتابی الگو (حداقل ${data.pat_info.min_sl}×ATR)، حد سود RR2، مدیریت با تریلینگ/بستن در ‎-xR پنل`);
+    if(acts.includes('sma_pullback')) infos.push(`🌊 موج دوم: روند SMA7 > SMA25 > SMA99 و SMA25 رو به بالا؛ حجم ۱۰ کندل اخیر ≥ ۱.۳× میانگین ۵۰ کندل قبلش؛ ورود روی بسته‌شدن کندل قرمز دومِ پشت سر هم، به شرطی که خط زرد (SMA7) از وسط سایه‌ی پایینش رد بشه (نه بدنه) و حجمش کمتر از میانگین اخیر باشه؛ روند نزولی برعکس؛ حد ضرر زیر کف ۳ کندل اخیر (حداقل ۱×ATR)؛ اگه قیمت بیش از ۶ ATR از SMA99 دور باشه ورود نه؛ حد سود از «حد سود» پنل`);
+    if(acts.includes('contrarian_btc')) infos.push(`⭐ استراتژی شخصی «خلاف جمعیت دیررس»: فقط خلاف روند داو بیت‌کوین (${data.contra_info.btc_tf}) — BTC نزولی → فقط خرید، BTC صعودی → فقط فروش، BTC خنثی → معامله نه؛ ماشه = ${data.contra_info.count} الگوی برگشتی کلاسیک (پوشا، چکش، ستاره‌ی صبحگاهی/شامگاهی، نفوذی/ابر سیاه، کف/سقف دوقلو، ...) روی کندل بسته‌شده؛ حد ضرر الگو (حداقل ${data.contra_info.min_sl}×ATR)، حد سود RR2؛ مدیریت با تریلینگ/بستن در ‎-xR پنل` + (data.timeframe !== '1d' ? ' ⚠️ برای روزانه طراحی و تست شده' : ''));
     if(acts.includes('fib_phase')) infos.push(`فیبوناچی حرکت دوم: حرکت اول ≥ ${data.fib_info.impulse}×ATR که سقف/کف قبلی رو شکسته، اصلاح به ناحیه‌ی ${data.fib_info.zone} و کندل برگشتی بسته‌شده؛ حد ضرر پشت کف/سقف اصلاح، حد سود RR2؛ امتیاز: ناحیه‌ی طلایی، RSI، حجم اصلاح، پروفایل حجم ${data.fib_info.vp} کندل، سطح شکسته‌شده، روند داو (حداقل امتیاز از همون «حداقل امتیاز ورود»)`);
     if(acts.includes('trend_follow')) infos.push(`روندگیر: شکست سقف/کف ${data.trend_info.bars} کندل هم‌جهت SMA${data.trend_info.ma}، حد ضرر ${data.trend_info.sl_atr}×ATR، بدون حد سود ثابت، ${data.trend_info.trail}`);
     document.getElementById('brkInfo').style.display = infos.length ? '' : 'none';
@@ -1054,6 +1088,7 @@ async function refresh(){
     Object.entries(OPT_KEYS).forEach(([id, key]) => {
       if(document.activeElement.id !== id) document.getElementById(id).checked = !!data[key];
     });
+    if(document.activeElement.id !== 'rrSelect') document.getElementById('rrSelect').value = data.rr_override ? String(data.rr_override) : '0';
     document.getElementById('optMinSlTip').innerText = `(حداقل ${data.test_min_sl_pct}٪ و ${data.test_min_sl_atr}×ATR)`;
     document.getElementById('retestTip').innerText = `(مهلت ${data.retest_wait_bars} کندل)`;
     document.getElementById('earlyTip').innerText = `(اگه تا ${data.early_exit_bars} کندل ${data.early_exit_min_r}R جلو نرفت)`;
@@ -1274,7 +1309,7 @@ document.getElementById('btNewOnlyBtn').addEventListener('click', () => {
   document.getElementById('btHtf').checked = true;
   document.getElementById('btStrictness').value = 'normal';
   document.getElementById('btMinSl').checked = true;   // حد ضرر خیلی نزدیک = کارمزد بیشتر از سود (طبق دیتای واقعی)
-  ['btRoom', 'btBtc', 'btLongOnly'].forEach(id => document.getElementById(id).checked = false);
+  ['btRoom', 'btBtc', 'btLongOnly', 'btPair', 'btAlt'].forEach(id => document.getElementById(id).checked = false);
   btStrategyChanged();
   document.getElementById('btStartBtn').click();
 });
@@ -1298,6 +1333,9 @@ document.getElementById('btStartBtn').addEventListener('click', async () => {
       room: document.getElementById('btRoom').checked,
       btc_filter: document.getElementById('btBtc').checked,
       long_only: document.getElementById('btLongOnly').checked,
+      pair_filter: document.getElementById('btPair').checked,
+      alt_filter: document.getElementById('btAlt').checked,
+      rr: parseFloat(document.getElementById('btRr').value) || 0,
       min_score: parseFloat(document.getElementById('btMinScore').value),
       strategy: document.getElementById('btStrategy').value,
       trail_profile: document.getElementById('btTrailProfile').value,
@@ -1375,7 +1413,7 @@ function renderBacktestResult(r){
 
   document.getElementById('btTotal').innerText = ov.total_trades +
     (ov.win_rate_95ci_pp ? ` (±${ov.win_rate_95ci_pp}٪)` : '');
-  document.getElementById('btWinRate').innerText = ov.win_rate + '%' + ` (${ov.wins}/${ov.rr_trades})`;
+  document.getElementById('btWinRate').innerText = ov.win_rate + '%' + ` (${ov.wins}/${ov.rr_trades})` + (ov.pos_rate !== undefined ? ` — معاملات در سود: ${ov.pos_rate}%` : '');
   document.getElementById('btEarlyRes').innerHTML = ov.early_trades
     ? `${ov.early_trades} معامله · <span class="${ov.early_pnl>=0?'green':'red'}" dir="ltr">${ov.early_pnl>=0?'+':''}${fmt(ov.early_pnl,2)}$ (${ov.early_pct>=0?'+':''}${ov.early_pct}%)</span>`
     : '۰';
@@ -1531,6 +1569,24 @@ document.getElementById('cmpPatBtn').addEventListener('click', () => {
   document.querySelectorAll('#cmpTfChecks input').forEach(x => x.checked = ['1h', '4h', '1d'].includes(x.dataset.tf));
   document.getElementById('cmpStartBtn').click();
 });
+function startContra(unseen){
+  document.getElementById('cmpDays').value = '730';
+  document.getElementById('cmpTopN').value = '40';
+  document.getElementById('cmpGrid').value = 'contrarian';
+  document.querySelectorAll('#cmpTfChecks input').forEach(x => x.checked = x.dataset.tf === '1d');
+  window.__cmpExtra = unseen ? {unseen: true} : {days_override: 1095};
+  document.getElementById('cmpStartBtn').click();
+}
+document.getElementById('cmpContraBtn').addEventListener('click', () => startContra(false));
+document.getElementById('cmpWave2Btn').addEventListener('click', () => {
+  document.getElementById('cmpDays').value = '730';
+  document.getElementById('cmpTopN').value = '40';
+  document.getElementById('cmpGrid').value = 'wave2';
+  document.querySelectorAll('#cmpTfChecks input').forEach(x => x.checked = ['15m', '1h'].includes(x.dataset.tf));
+  window.__cmpExtra = {days_override: 730};
+  document.getElementById('cmpStartBtn').click();
+});
+document.getElementById('cmpContraOldBtn').addEventListener('click', () => startContra(true));
 document.getElementById('cmpFibBtn').addEventListener('click', () => {
   document.getElementById('cmpDays').value = '730';
   document.getElementById('cmpTopN').value = '30';
@@ -1548,8 +1604,10 @@ document.getElementById('cmpStartBtn').addEventListener('click', async () => {
       top_n: parseInt(document.getElementById('cmpTopN').value),
       grid: document.getElementById('cmpGrid').value,
       timeframes: [...document.querySelectorAll('#cmpTfChecks input:checked')].map(x => x.dataset.tf),
+      ...(window.__cmpExtra || {}),
     })
   });
+  window.__cmpExtra = null;
   const data = await res.json();
   if(!data.ok){
     msg.innerText = 'خطا: ' + (data.error || ''); msg.style.color = 'var(--red)';
@@ -1664,6 +1722,9 @@ function backtestCompareConfig(source, idx){
   document.getElementById('btRoom').checked = conf.room;
   document.getElementById('btBtc').checked = conf.btc_filter;
   document.getElementById('btLongOnly').checked = conf.long_only;
+  document.getElementById('btPair').checked = !!conf.pair_filter;
+  document.getElementById('btAlt').checked = !!conf.alt_filter;
+  document.getElementById('btRr').value = conf.rr ? String(conf.rr) : '0';
   if(conf.min_score != null) document.getElementById('btMinScore').value = String(conf.min_score).replace(/\.0$/, '');
   document.getElementById('btStartBtn').scrollIntoView({behavior:'smooth', block:'center'});
   document.getElementById('btStartBtn').click();

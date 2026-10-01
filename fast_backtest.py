@@ -77,6 +77,12 @@ def plan_jobs(symbols, days, cfg, now_ms=None):
     if need_htf is None:
         need_htf = getattr(cfg, "USE_HTF_CONFIRMATION", True)
     htfs = list(getattr(cfg, "HTF_TIMEFRAMES", [])) if need_htf else []
+    # فیلتر «ارز÷BTC» و «شاخص آلت‌ها÷BTC» به کندل‌های تایم‌فریم روند BTC هر ارز نیاز دارن
+    need_pair = bool(getattr(cfg, "_NEED_PAIR", False) or getattr(cfg, "PAIR_FILTER", False)
+                     or getattr(cfg, "ALT_FILTER", False))
+    btc_tf0 = getattr(cfg, "BTC_REGIME_TIMEFRAME", "4h")
+    if need_pair and btc_tf0 not in htfs:
+        htfs.append(btc_tf0)
     for tf in htfs:
         tf_ms = market_data.TF_MS.get(tf)
         # ۱ساعته و ۴ساعته رو از خود کندل‌های ۱۵ دقیقه‌ای می‌سازیم (دقیقاً همون سقف/کف‌ها،
@@ -98,8 +104,16 @@ def plan_jobs(symbols, days, cfg, now_ms=None):
         btc_job = (getattr(cfg, "BTC_REGIME_SYMBOL", "BTC/USDT"), btc_tf,
                    start_ms - (htf_limit + 5) * market_data.approx_tf_ms(btc_tf) - warm_main)
         jobs.append(btc_job)
+    alt_jobs = []
+    if need_pair and btc_job:
+        have = {(j[0], j[1]) for j in jobs}
+        for sym in getattr(cfg, "ALT_INDEX_SYMBOLS", []) or []:
+            j = (sym, btc_job[1], btc_job[2])
+            alt_jobs.append(j)
+            if (sym, btc_job[1]) not in have:
+                jobs.append(j)
     return {"start_ms": start_ms, "now_ms": now_ms, "jobs": jobs, "resampled": resampled,
-            "fetched": fetched, "btc_job": btc_job, "main_since_ms": start_ms - warm_main}
+            "fetched": fetched, "btc_job": btc_job, "main_since_ms": start_ms - warm_main, "alt_jobs": alt_jobs}
 
 
 def load_market_data(cache, symbols, days, cfg, progress_cb=None, offline=False, now_ms=None):
@@ -132,6 +146,10 @@ class SymbolPrep:
         self.htf_wlong = htf_wlong if htf_wlong is not None else np.zeros(series.n)
         self.htf_wshort = htf_wshort if htf_wshort is not None else np.zeros(series.n)
         self.btc_trend = btc_trend
+        # روند داو «ارز÷BTC» و «شاخص آلت‌ها÷BTC» در تایم‌فریم روند BTC (۱/‎-۱/۰)؛ برای خود BTC بی‌معنی
+        self.pair_trend = np.zeros(series.n, dtype=np.int8)
+        self.alt_trend = np.zeros(series.n, dtype=np.int8)
+        self.is_btc = symbol == getattr(cfg, "BTC_REGIME_SYMBOL", "BTC/USDT")
         self.first_idx = first_idx
         profiles = dict(getattr(cfg, "TRAIL_PROFILES", None) or {})
         if getattr(cfg, "TREND_TRAIL", None):
@@ -167,7 +185,8 @@ class SymbolPrep:
         return f
 
 
-def prepare_symbol(symbol, main_arr, htf_arrays, btc_arr, start_ms, cfg, strategies_needed=None, keep_volume=False):
+def prepare_symbol(symbol, main_arr, htf_arrays, btc_arr, start_ms, cfg, strategies_needed=None, keep_volume=False,
+                   alt=None):
     series = se.Series(main_arr, cfg.TIMEFRAME)
     first_idx = int(np.searchsorted(series.close_ts, start_ms, "left"))
     if strategies_needed:
@@ -218,7 +237,18 @@ def prepare_symbol(symbol, main_arr, htf_arrays, btc_arr, start_ms, cfg, strateg
         tr = se.htf_trend_series(bs, order, htf_limit)
         al = se.align_to(series.close_ts, bs, tr)
         btc_trend = np.where(al == 2, 0, al).astype(np.int8)
-    return SymbolPrep(symbol, series, structural, htf_long, htf_short, btc_trend, first_idx, cfg, wl, ws)
+    prep = SymbolPrep(symbol, series, structural, htf_long, htf_short, btc_trend, first_idx, cfg, wl, ws)
+    btc_tf = getattr(cfg, "BTC_REGIME_TIMEFRAME", "4h")
+    sym_tf_arr = htf_arrays.get(btc_tf)
+    if not prep.is_btc and sym_tf_arr is not None and len(sym_tf_arr) and btc_arr is not None and len(btc_arr):
+        rs = se.pair_ratio_series(sym_tf_arr, btc_arr, btc_tf)
+        if rs is not None:
+            al = se.align_to(series.close_ts, rs, se.htf_trend_series(rs, order, htf_limit))
+            prep.pair_trend = np.where(al == 2, 0, al).astype(np.int8)
+    if alt is not None:
+        al = se.align_to(series.close_ts, alt[0], alt[1])
+        prep.alt_trend = np.where(al == 2, 0, al).astype(np.int8)
+    return prep
 
 
 def prepare_all(plan, data, symbols, cfg, progress_cb=None, strategies_needed=None, keep_volume=False):
@@ -227,6 +257,18 @@ def prepare_all(plan, data, symbols, cfg, progress_cb=None, strategies_needed=No
     if plan.get("btc_job"):
         b = data.get((plan["btc_job"][0], plan["btc_job"][1]))
         btc_arr = None if isinstance(b, Exception) else b
+    alt = None
+    if plan.get("alt_jobs") and btc_arr is not None and len(btc_arr):
+        members = []
+        for j in plan["alt_jobs"]:
+            a = data.get((j[0], j[1]))
+            if a is not None and not isinstance(a, Exception) and len(a):
+                members.append(np.asarray(a)[np.asarray(a)[:, 0] < plan["now_ms"]])
+        if members:
+            btc_tf = plan["btc_job"][1]
+            b = np.asarray(btc_arr)
+            ai = se.alt_index_series(members, b[b[:, 0] < plan["now_ms"]], btc_tf)
+            alt = (ai, se.htf_trend_series(ai, cfg.SWING_ORDER, int(getattr(cfg, "HTF_CANDLE_LIMIT", 120))))
     for i, sym in enumerate(symbols):
         main = data.get((sym, cfg.TIMEFRAME))
         if main is None or isinstance(main, Exception):
@@ -258,7 +300,7 @@ def prepare_all(plan, data, symbols, cfg, progress_cb=None, strategies_needed=No
             htf_arrays[tf] = None if (a is None or isinstance(a, Exception)) else np.asarray(a)
         try:
             prep = prepare_symbol(sym, main, htf_arrays, btc_arr, plan["start_ms"], cfg, strategies_needed,
-                                  keep_volume)
+                                  keep_volume, alt=alt)
         except Exception as e:  # نماد خراب نباید کل بک‌تست رو متوقف کنه
             meta[sym] = {"ok": False, "error": f"خطای آماده‌سازی: {e}"}
             continue
@@ -386,4 +428,6 @@ def run_single(preps, symbols, cfg, record=True):
     P = sim_engine.SimParams(cfg, cfg.HTF_MIN_AGREEMENT, trailing,
                              allow_long=getattr(cfg, "ALLOW_LONG", True), allow_short=getattr(cfg, "ALLOW_SHORT", True),
                              btc_filter=getattr(cfg, "BTC_REGIME_FILTER", False))
+    P.pair_filter = bool(getattr(cfg, "PAIR_FILTER", False))
+    P.alt_filter = bool(getattr(cfg, "ALT_FILTER", False))
     return sim_engine.run_portfolio(merged, preps, order, P, record=record), P

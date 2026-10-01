@@ -757,7 +757,8 @@ def get_stats(conn, initial_capital=None):
     groups = {"WIN": [], "LOSS": [], "TRAIL": [], "EARLY": [], "OTHER": []}
     exit_type_counts = {}
     for pnl, et in closed:
-        groups[result_of(et)].append(pnl or 0.0)
+        # بستن در ‎-xR (CUT) باخته (با ضرر کمتر)؛ وگرنه وین ریت با «بستن در ضرر» الکی بالا نشون داده می‌شد
+        groups["LOSS" if et == "CUT" else result_of(et)].append(pnl or 0.0)
         et = et or "UNKNOWN"
         exit_type_counts[et] = exit_type_counts.get(et, 0) + 1
     wins, losses = len(groups["WIN"]), len(groups["LOSS"])
@@ -767,6 +768,7 @@ def get_stats(conn, initial_capital=None):
     return {
         "total_trades": total, "rr_trades": rr_total, "wins": wins, "losses": losses,
         "win_rate": round(wins / rr_total * 100, 2) if rr_total else 0.0,
+        "pos_rate": round(sum(1 for p, _ in closed if (p or 0) > 0) / total * 100, 1) if total else 0.0,
         "total_pnl": round(sum(p or 0 for p, _ in closed), 2),
         "rr_pnl": round(sum(groups["WIN"]) + sum(groups["LOSS"]), 2),
         "trail_trades": len(groups["TRAIL"]), "trail_pnl": round(trail_pnl, 2),

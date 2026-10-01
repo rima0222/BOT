@@ -86,7 +86,9 @@ def live_cfg_for(name, cfg):
     """تابع زنده و تنظیمات معادل هر کلید موتور (box_breakout@retest = شکست باکس با ورود پولبک)."""
     base = name.split("@")[0]
     c = backtest.build_config(cfg, {"BRK_ENTRY": "retest" if name.endswith("@retest") else "close",
-                                    "PAT_STRUCTURE": "off" if name.endswith("@free") else "with"})
+                                    "PAT_STRUCTURE": "off" if name.endswith("@free") else "with",
+                                    "CONTRA_BTC": "off" if name.endswith("@any") else "against",
+                                    "WV_VOL": not name.endswith("@novol")})
     return strategies.STRATEGY_REGISTRY[base]["fn"], c
 
 
@@ -141,7 +143,8 @@ def test_strategy_equivalence():
                             check(False, f"[v{vi}] {name} t={t}: مقادیر فرق دارن زنده={live} موتور={eng}")
         check(mism == 0, f"[v{vi}] {mism} مورد عدم تطابق")
     print(f"  ✓ {total_sig} سیگنال بررسی شد {per_name}")
-    check(all(v > 50 for v in per_name.values()), f"تعداد سیگنال برای تست معتبر خیلی کمه {per_name}")
+    check(all(v > 50 for k, v in per_name.items() if not k.startswith("sma_pullback")),
+          f"تعداد سیگنال برای تست معتبر خیلی کمه {per_name}")
 
 
 def test_combined_live_wrapper():
@@ -152,7 +155,9 @@ def test_combined_live_wrapper():
         cfg = make_cfg(WC_MIN_SCORE_PCT=0 if name == "fib_phase" else 60, MIN_SL_PCT=0.3,
                        ACTIVE_STRATEGIES=[name.split("@")[0]],
                        BRK_ENTRY="retest" if name.endswith("@retest") else "close",
-                       PAT_STRUCTURE="off" if name.endswith("@free") else "with")
+                       PAT_STRUCTURE="off" if name.endswith("@free") else "with",
+                       CONTRA_BTC="off" if name.endswith("@any") else "against",
+                       WV_VOL=not name.endswith("@novol"))
         check(strategies.engine_name(cfg) == name, f"engine_name اشتباه برای {name}")
         W = cfg.CANDLE_LIMIT
         st = se.compute_structural(series, cfg, 0)
@@ -173,7 +178,8 @@ def test_combined_live_wrapper():
             elif live:
                 checked += 1
         check(mism == 0, f"مسیر زنده {name}: {mism} عدم تطابق")
-        check(checked > 5, f"مسیر زنده {name}: سیگنال خیلی کم ({checked})")
+        # موج دوم روی این دیتای مصنوعی کمیاب‌ه (جهش حجم + دو کندل اصلاحی)؛ تست کامل خودش: test_wave2_dense
+        check(checked > 5 or name.startswith("sma_pullback"), f"مسیر زنده {name}: سیگنال خیلی کم ({checked})")
         print(f"  ✓ {name}: {checked} سیگنال")
     # ترکیب چند استراتژی: اولویت با اولی
     cfg = make_cfg(WC_MIN_SCORE_PCT=60, ACTIVE_STRATEGIES=["trend_follow", "weighted_confluence"])
@@ -720,6 +726,212 @@ def test_pattern_structure_dense():
     print(f"  ✓ {total} سیگنال روی همه‌ی کندل‌ها یکسان؛ سبد با تریلینگ: {len(res['trades'])} معامله، خروج‌ها {types}")
 
 
+def test_contrarian_dense():
+    print("۱۵) استراتژی شخصی «خلاف جمعیت»: همه‌ی کندل‌ها موتور == ربات زنده، + شرط BTC در سبد == قانون زنده")
+    total = mism = 0
+    for seed, over in ((111, {}), (112, {"CONTRA_MIN_SL_ATR": 1.5}), (113, {"CONTRA_BTC": "off"})):
+        arr = synth(1500, seed=seed)
+        series = se.Series(arr, "15m")
+        cfg = make_cfg(ACTIVE_STRATEGIES=["contrarian_btc"], **over)
+        key = strategies.engine_name(cfg)
+        check(key == ("contrarian_btc@any" if over.get("CONTRA_BTC") == "off" else "contrarian_btc"), f"کلید {key}")
+        W = cfg.CANDLE_LIMIT
+        structural = se.compute_structural(series, cfg, 0)
+        prep_like = fast_backtest.SymbolPrep("T", series, structural, None, None, None, 0, cfg)
+        f = prep_like.finals(key, fast_backtest.variant_from_cfg(cfg))
+        eng = {int(i): k for k, i in enumerate(f.idx)}
+        for t in range(W - 1, series.n):
+            live = strategies.generate_contrarian_btc(series.to_df(t - W + 1, t + 1), cfg).get("signal")
+            k = eng.get(t)
+            if (live is None) != (k is None):
+                mism += 1
+                if mism <= 3:
+                    check(False, f"خلاف جمعیت t={t}: زنده={live} موتور={'-' if k is None else f.sl[k]}")
+                continue
+            if live is not None:
+                total += 1
+                if not (live["side"] == ("LONG" if f.side[k] == 1 else "SHORT") and close_enough(live["sl"], f.sl[k])
+                        and close_enough(live["tp"], f.tp[k])):
+                    mism += 1
+    check(mism == 0 and total >= 50, f"خلاف جمعیت: {mism} عدم تطابق از {total} سیگنال")
+
+    # سبد با BTC: هر معامله‌ی contrarian_btc باید خلاف روند BTC همون لحظه باشه، و روند BTC موتور == ربات زنده
+    btc = synth(6000, seed=120, price=30000.0)
+    btc4 = fast_backtest._resample(btc, "15m", "4h")
+    arrs = {f"C{i}/USDT": synth(6000, seed=121 + i, price=10 + i * 5) for i in range(4)}
+    res_n = {}
+    for mode in ("against", "off"):
+        cfg = make_cfg(ACTIVE_STRATEGIES=["contrarian_btc"], HTF_TIMEFRAMES=["1h", "4h"], USE_HTF_CONFIRMATION=False,
+                       USE_TRAILING_SL=True, TRAIL_PROFILE="strict", CUT_LOSS_R=0.5, CONTRA_BTC=mode,
+                       BTC_REGIME_TIMEFRAME="4h")
+        preps = {}
+        for sym, a in arrs.items():
+            htf = {"1h": fast_backtest._resample(a, "15m", "1h"), "4h": fast_backtest._resample(a, "15m", "4h")}
+            preps[sym] = fast_backtest.prepare_symbol(sym, a, htf, btc4, int(a[400, 0]), cfg)
+        res, _ = fast_backtest.run_single(preps, list(arrs), cfg)
+        res_n[mode] = len(res["trades"])
+        if mode == "against":
+            bs = se.Series(btc4, "4h")
+            bad = btc_mism = 0
+            for tr in res["trades"]:
+                p = preps[tr["symbol"]]
+                i = int(tr["sig_idx"])
+                b = int(p.btc_trend[i])
+                if not strategies.contra_btc_allows(tr["side"], b):
+                    bad += 1
+                # روند BTC به روش ربات زنده (آخرین HTF_CANDLE_LIMIT کندل ۴ساعته‌ی بسته‌شده)
+                ct = p.series.close_ts[i]
+                j = int(np.searchsorted(bs.close_ts, ct, "right")) - 1
+                df = bs.to_df(max(0, j - config.HTF_CANDLE_LIMIT + 1), j + 1)
+                lt = analysis.trend_from_df(df, swing_order=config.SWING_ORDER) \
+                    if len(df) >= config.SWING_ORDER * 2 + 5 else None
+                if strategies.contra_btc_allows(tr["side"], lt) != strategies.contra_btc_allows(tr["side"], b):
+                    btc_mism += 1
+            check(bad == 0, f"خلاف جمعیت: {bad} معامله هم‌جهت BTC باز شده")
+            check(btc_mism == 0, f"روند BTC موتور ≠ زنده در {btc_mism} معامله")
+            types = sorted({t["exit_type"] for t in res["trades"]})
+    check(res_n["against"] > 5 and res_n["off"] > res_n["against"],
+          f"سبد خلاف جمعیت: با شرط {res_n['against']}، بدون شرط {res_n['off']} معامله")
+    print(f"  ✓ {total} سیگنال روی همه‌ی کندل‌ها یکسان؛ سبد: با شرط BTC {res_n['against']} معامله، "
+          f"بدون شرط {res_n['off']}؛ خروج‌ها {types}")
+
+
+def test_wipe_history():
+    print("۱۶) شروع از صفر: پاک شدن معاملات/لاگ‌ها و برگشت موجودی")
+    import sqlite3
+    conn = paper_trader.get_conn(":memory:")
+    conn.execute("INSERT INTO trades (symbol, status, pnl) VALUES ('X/USDT', 'CLOSED', 5.0)")
+    conn.execute("INSERT INTO trades (symbol, status) VALUES ('Y/USDT', 'OPEN')")
+    conn.execute("INSERT INTO signal_log (symbol, side) VALUES ('X/USDT', 'LONG')")
+    paper_trader.record_equity(conn, 123.0)
+    paper_trader.set_setting(conn, "strategy", "contrarian_btc")
+    paper_trader.wipe_history(conn, 100.0)
+    n = [conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("trades", "signal_log")]
+    check(n == [0, 0], f"بعد از پاک‌سازی: {n}")
+    check(paper_trader.get_balance(conn, 100.0) == 100.0, "موجودی به سرمایه‌ی اولیه برنگشت")
+    check(paper_trader.get_setting(conn, "strategy", None) == "contrarian_btc", "تنظیمات نباید پاک بشن")
+    check(paper_trader.get_open_position_count(conn) == 0, "پوزیشن باز مونده")
+    print("  ✓ انجام شد")
+
+
+def test_pair_alt_filters():
+    print("۱۷) فیلتر ارز÷BTC و شاخص آلت‌ها÷BTC: موتور == ربات زنده، + اعمال در سبد")
+    H = config.HTF_CANDLE_LIMIT
+    order = config.SWING_ORDER
+    btc = synth(16000, seed=200, price=30000.0)
+    btc4 = fast_backtest._resample(btc, "15m", "4h")
+    members = []
+    for i in range(5):
+        a = fast_backtest._resample(synth(16000, seed=201 + i, price=5 + i), "15m", "4h")
+        if i == 3:
+            a = a[150:]                                  # لیست‌شده بعداً
+        if i == 4:
+            a = np.delete(a, np.arange(300, 305), axis=0)  # وقفه‌ی دیتا
+        members.append(a)
+    ai = se.alt_index_series(members, btc4, "4h")
+    tr = se.htf_trend_series(ai, order, H)
+    bs = se.Series(btc4, "4h")
+    ms = [se.Series(m, "4h") for m in members]
+    mism = checked = 0
+    for j in range(20, bs.n, 7):
+        bdf = bs.to_df(max(0, j - H + 1), j + 1)
+        t_end = bs.ts[j]
+        mdfs = []
+        for m in ms:
+            k = int(np.searchsorted(m.ts, t_end, "right"))
+            mdfs.append(m.to_df(max(0, k - H), k) if k > 0 else None)
+        idf = se.alt_index_df(mdfs, bdf)
+        live = analysis.trend_from_df(idf, swing_order=order) if len(idf) >= order * 2 + 5 else None
+        eng = int(tr[j])
+        lv = {"uptrend": 1, "downtrend": -1}.get(live, 0 if live is not None else 2)
+        if eng == 2 and live is None:
+            continue
+        checked += 1
+        if lv != eng:
+            mism += 1
+    check(mism == 0 and checked > 50, f"شاخص آلت‌ها: {mism} عدم تطابق از {checked}")
+
+    # سبد: روند ارز÷BTC موتور == زنده برای هر معامله، و فیلترها اعمال شدن
+    arrs = {f"Q{i}/USDT": synth(6000, seed=221 + i, price=10 + i * 5) for i in range(4)}
+    counts = {}
+    for pf, af in ((False, False), (True, False), (False, True)):
+        cfg = make_cfg(ACTIVE_STRATEGIES=["pattern_structure"], PAT_STRUCTURE="off", HTF_TIMEFRAMES=["1h", "4h"],
+                       USE_HTF_CONFIRMATION=False, BTC_REGIME_TIMEFRAME="4h", PAIR_FILTER=pf, ALT_FILTER=af)
+        alt = (ai, tr)
+        preps = {}
+        for sym, a in arrs.items():
+            htf = {"1h": fast_backtest._resample(a, "15m", "1h"), "4h": fast_backtest._resample(a, "15m", "4h")}
+            preps[sym] = fast_backtest.prepare_symbol(sym, a, htf, btc4, int(a[400, 0]), cfg, alt=alt)
+        res, _ = fast_backtest.run_single(preps, list(arrs), cfg)
+        counts[(pf, af)] = len(res["trades"])
+        bad = pmism = 0
+        for trd in res["trades"]:
+            p = preps[trd["symbol"]]
+            i = int(trd["sig_idx"])
+            want = 1 if trd["side"] == "LONG" else -1
+            if pf and p.pair_trend[i] != want:
+                bad += 1
+            if af and p.alt_trend[i] != want:
+                bad += 1
+            if pf:
+                # روش ربات زنده: آخرین H کندل ۴ساعته‌ی بسته‌شده‌ی ارز و BTC، ادغام، روند داو
+                s4 = se.Series(fast_backtest._resample(arrs[trd["symbol"]], "15m", "4h"), "4h")
+                ct = p.series.close_ts[i]
+                k1 = int(np.searchsorted(s4.close_ts, ct, "right"))
+                k2 = int(np.searchsorted(bs.close_ts, ct, "right"))
+                rdf = se.pair_ratio_df(s4.to_df(max(0, k1 - H), k1), bs.to_df(max(0, k2 - H), k2))
+                lt = analysis.trend_from_df(rdf, swing_order=order) if len(rdf) >= order * 2 + 5 else None
+                if {"uptrend": 1, "downtrend": -1}.get(lt, 0) != int(p.pair_trend[i]):
+                    pmism += 1
+        check(bad == 0, f"فیلتر ارز/آلت ({pf},{af}): {bad} معامله‌ی ناهم‌جهت")
+        check(pmism == 0, f"روند ارز÷BTC موتور ≠ زنده در {pmism} معامله")
+    check(counts[(False, False)] > counts[(True, False)] > 5 and counts[(False, False)] > counts[(False, True)] > 5,
+          f"تعداد معاملات {counts}")
+    print(f"  ✓ شاخص آلت‌ها {checked} نقطه یکسان؛ معاملات: بدون فیلتر {counts[(False, False)]}، "
+          f"ارز÷BTC {counts[(True, False)]}، شاخص آلت‌ها {counts[(False, True)]}")
+
+
+def test_wave2_dense():
+    print("۱۸) موج دوم (پولبک به SMA7): همه‌ی کندل‌ها موتور == ربات زنده (با/بدون فیلتر حجم، چند تنظیم)")
+    total = mism = 0
+    per = {}
+    for seed, over in ((301, {}), (302, {"WV_VOL": False}), (303, {"WV_VOL_MULT": 1.0, "WV_MAX_EXT_ATR": 10.0,
+                                                                    "WV_SL_BARS": 5, "MIN_RISK_REWARD": 2.5,
+                                                                    "WV_COUNTER_BARS": 1})):
+        arr = synth(4000, seed=seed)
+        series = se.Series(arr, "15m")
+        cfg = make_cfg(ACTIVE_STRATEGIES=["sma_pullback"], **over)
+        key = strategies.engine_name(cfg)
+        W = cfg.CANDLE_LIMIT
+        structural = se.compute_structural(series, cfg, 0)
+        prep_like = fast_backtest.SymbolPrep("T", series, structural, None, None, None, 0, cfg)
+        f = prep_like.finals(key, fast_backtest.variant_from_cfg(cfg))
+        eng = {int(i): k for k, i in enumerate(f.idx)}
+        per[key] = per.get(key, 0)
+        for t in range(W - 1, series.n):
+            live = strategies.generate_sma_pullback(series.to_df(t - W + 1, t + 1), cfg).get("signal")
+            k = eng.get(t)
+            if (live is None) != (k is None):
+                mism += 1
+                if mism <= 3:
+                    check(False, f"موج دوم t={t}: زنده={live} موتور={'-' if k is None else f.sl[k]}")
+                continue
+            if live is not None:
+                total += 1
+                per[key] += 1
+                if not (live["side"] == ("LONG" if f.side[k] == 1 else "SHORT") and close_enough(live["sl"], f.sl[k])
+                        and close_enough(live["tp"], f.tp[k]) and close_enough(live["rr"], f.rr[k])):
+                    mism += 1
+    check(mism == 0 and all(v >= 10 for v in per.values()), f"موج دوم: {mism} عدم تطابق، سیگنال‌ها {per}")
+    arrs = {f"W{i}/USDT": synth(6000, seed=310 + i, price=10 + i * 5) for i in range(4)}
+    cfg = make_cfg(ACTIVE_STRATEGIES=["sma_pullback"], HTF_TIMEFRAMES=["1h", "4h"], USE_HTF_CONFIRMATION=False,
+                   USE_TRAILING_SL=False)
+    preps = _build_preps(arrs, cfg, int(arrs["W0/USDT"][400, 0]))
+    res, _ = fast_backtest.run_single(preps, list(arrs), cfg)
+    check(len(res["trades"]) > 5, f"سبد موج دوم: {len(res['trades'])} معامله")
+    print(f"  ✓ {total} سیگنال روی همه‌ی کندل‌ها یکسان {per}؛ سبد: {len(res['trades'])} معامله")
+
+
 if __name__ == "__main__":
     t_start = time.time()
     test_strategy_equivalence()
@@ -736,6 +948,10 @@ if __name__ == "__main__":
     test_xs_momentum()
     test_fib_dense()
     test_pattern_structure_dense()
+    test_contrarian_dense()
+    test_wipe_history()
+    test_pair_alt_filters()
+    test_wave2_dense()
     print()
     if FAILS:
         print(f"❌ {len(FAILS)} خطا")

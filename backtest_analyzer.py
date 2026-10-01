@@ -100,6 +100,9 @@ def analyze(conn, cfg, meta):
     # برد = رسیدن به هدف R:R، باخت = حد ضرر اولیه. خروج تریلینگ و بقیه جدا شمرده می‌شن.
     for t in trades:
         t["result"] = paper_trader.result_of(t["exit_type"])
+        # بستن در ‎-xR (CUT) هم باخته (با ضرر کمتر) — وگرنه با «بستن در ضرر» وین ریت الکی ۱۰۰٪ نشون داده می‌شد
+        if t.get("exit_type") == "CUT":
+            t["result"] = "LOSS"
     wins = [t for t in trades if t["result"] == "WIN"]
     losses = [t for t in trades if t["result"] == "LOSS"]
     trails = [t for t in trades if t["result"] == "TRAIL"]
@@ -251,6 +254,7 @@ def analyze(conn, cfg, meta):
 
     overview = {
         "total_trades": total, "rr_trades": rr_total, "wins": len(wins), "losses": len(losses), "win_rate": win_rate,
+        "pos_rate": round(sum(1 for t in trades if t["pnl"] > 0) / total * 100, 1) if total else 0.0,
         "trail_trades": len(trails), "trail_pnl": round(sum(t["pnl"] for t in trails), 2),
         "trail_pct": round(sum(t["pnl"] for t in trails) / cfg.VIRTUAL_BALANCE_START * 100, 2)
         if cfg.VIRTUAL_BALANCE_START else 0.0,

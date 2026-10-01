@@ -59,7 +59,7 @@ def main():
     ap.add_argument("--symbols", type=str, default="", help="لیست نماد با کاما (به‌جای --top)")
     ap.add_argument("--timeframes", type=str, default="15m,1h,4h",
                     help="تایم‌فریم‌ها با کاما: 1m,5m (اسکلپ) 15m,1h,4h (نوسان‌گیری)")
-    ap.add_argument("--grid", choices=["quick", "full", "focus", "all", "fib", "pattern", "contrarian"], default="quick",
+    ap.add_argument("--grid", choices=["quick", "full", "focus", "all", "fib", "pattern", "contrarian", "wave2"], default="quick",
                     help="focus = فقط استراتژی شکست باکس و گزینه‌های جدیدش (سریع)")
     ap.add_argument("--end", type=str, default="",
                     help="تاریخ پایان بازه (YYYY-MM-DD، UTC) — برای تست روی گذشته؛ خالی = الان")
@@ -127,6 +127,7 @@ def main():
             prof = config.TIMEFRAME_PROFILES[tf]
             cfg = fast_backtest.profile_cfg(base_cfg, tf)
             cfg._NEED_HTF = True   # مقایسه هر دو حالت (با و بدون تایید HTF) رو تست می‌کنه
+            cfg._NEED_PAIR = True  # دیتای ارز÷BTC و شاخص آلت‌ها (برای فیلترهای نسخه‌ی ۱۹)
             days = min(args.days, int(prof["MAX_DAYS"]))
             symbols = all_symbols[:min(len(all_symbols), int(prof["SCAN_SYMBOLS"]))]
             lo, span = i / n_tf, 1.0 / n_tf
